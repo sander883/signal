@@ -23,20 +23,15 @@ const stats = {
 };
 
 /**
- * Main analysis cycle.
- * This runs on every cron tick and performs the full signal pipeline:
- * 1. Check session filter
- * 2. Check news filter
- * 3. Fetch market data
- * 4. Compute indicators
- * 5. Run strategies
- * 6. Validate and calculate risk
- * 7. Send Telegram alert
+ * Run analysis for a SINGLE timeframe.
+ * Called independently by each timeframe's cron job.
+ *
+ * @param {string} timeframe - e.g. '15min', '1h'
  */
-async function runAnalysis() {
+async function runAnalysisForTimeframe(timeframe) {
   const cycleStart = Date.now();
   logger.info('='.repeat(60));
-  logger.info(`Analysis cycle started | ${new Date().toUTCString()}`);
+  logger.info(`[${timeframe}] Analysis cycle started | ${new Date().toUTCString()}`);
   logger.info(`Session: ${sessionFilter.getCurrentSession()}`);
 
   try {
@@ -44,90 +39,92 @@ async function runAnalysis() {
     const session = sessionFilter.check();
     if (!session.allowed) {
       stats.sessionBlocked++;
-      logger.info(`[SESSION BLOCK] ${session.reason}`);
+      logger.info(`[${timeframe}] [SESSION BLOCK] ${session.reason}`);
       return;
     }
-    logger.info(`[Session] ${session.reason}`);
+    logger.info(`[${timeframe}] [Session] ${session.reason}`);
 
     // ── STEP 2: News Filter (MANDATORY) ──
     const news = await newsFilter.check();
     if (news.blocked) {
       stats.newsBlocked++;
-      logger.warn(`[NEWS BLOCK ACTIVE] ${news.reason}`);
+      logger.warn(`[${timeframe}] [NEWS BLOCK ACTIVE] ${news.reason}`);
       await telegram.sendNewsBlock(news.reason);
       return;
     }
     if (news.nextEvent) {
-      logger.info(`[News] Next event: ${news.nextEvent.title}`);
+      logger.info(`[${timeframe}] [News] Next event: ${news.nextEvent.title}`);
     }
 
     // ── STEP 3: Fetch Market Data ──
-    logger.info(`Fetching ${config.symbol} data [${config.primaryTimeframe}]...`);
-    const candles = await marketData.fetchCandles(config.primaryTimeframe, 250);
+    logger.info(`[${timeframe}] Fetching ${config.symbol} data...`);
+    const candles = await marketData.fetchCandles(timeframe, 250);
     if (!candles || candles.length < 50) {
-      logger.error('Insufficient candle data for analysis');
+      logger.error(`[${timeframe}] Insufficient candle data for analysis`);
       stats.errors++;
       return;
     }
 
-    // Also fetch secondary timeframe for trend alignment
-    let secondaryCandles = null;
-    try {
-      secondaryCandles = await marketData.fetchCandles(config.secondaryTimeframe, 100);
-    } catch (err) {
-      logger.warn(`Secondary timeframe fetch failed: ${err.message}`);
+    // Fetch higher timeframe for trend alignment
+    // For H1: use H4/Daily as alignment. For M15: use H1.
+    const alignmentTF = getAlignmentTimeframe(timeframe);
+    let alignmentTrend = 'neutral';
+
+    if (alignmentTF) {
+      try {
+        const alignCandles = await marketData.fetchCandles(alignmentTF, 100);
+        if (alignCandles && alignCandles.length > 50) {
+          const alignInd = indicators.compute(alignCandles);
+          const aEma50 = indicators.latest(alignInd.ema50);
+          const aEma200 = indicators.latest(alignInd.ema200);
+          if (aEma50 && aEma200) {
+            alignmentTrend = aEma50 > aEma200 ? 'bullish' : 'bearish';
+          }
+        }
+      } catch (err) {
+        logger.warn(`[${timeframe}] Alignment TF (${alignmentTF}) fetch failed: ${err.message}`);
+      }
     }
 
     // ── STEP 4: Compute Indicators ──
     const indData = indicators.compute(candles);
-    let secondaryTrend = 'neutral';
-
-    if (secondaryCandles && secondaryCandles.length > 50) {
-      const secInd = indicators.compute(secondaryCandles);
-      const secEma50 = indicators.latest(secInd.ema50);
-      const secEma200 = indicators.latest(secInd.ema200);
-      if (secEma50 && secEma200) {
-        secondaryTrend = secEma50 > secEma200 ? 'bullish' : 'bearish';
-      }
-    }
-
     const currentPrice = candles[candles.length - 1].close;
-    logger.info(`Current price: ${currentPrice.toFixed(2)} | H1 trend: ${secondaryTrend}`);
+    logger.info(
+      `[${timeframe}] Price: ${currentPrice.toFixed(2)} | ` +
+        `Alignment (${alignmentTF || 'none'}): ${alignmentTrend}`
+    );
 
     // ── STEP 5: Run All Strategies ──
     const signals = strategies.runAll(indData);
     const bestSignal = strategies.getBestSignal(signals);
 
     if (!bestSignal) {
-      logger.info('No valid signals generated this cycle');
-      logger.info(`Cycle completed in ${Date.now() - cycleStart}ms`);
+      logger.info(`[${timeframe}] No valid signals generated`);
+      logger.info(`[${timeframe}] Cycle completed in ${Date.now() - cycleStart}ms`);
       return;
     }
 
     // ── STEP 6: Trend Alignment Check ──
-    if (secondaryTrend !== 'neutral') {
+    if (alignmentTrend !== 'neutral') {
       const aligned =
-        (bestSignal.signal === 'BUY' && secondaryTrend === 'bullish') ||
-        (bestSignal.signal === 'SELL' && secondaryTrend === 'bearish');
+        (bestSignal.signal === 'BUY' && alignmentTrend === 'bullish') ||
+        (bestSignal.signal === 'SELL' && alignmentTrend === 'bearish');
 
       if (!aligned) {
-        // Don't block, but reduce confidence
         bestSignal.confidence = Math.max(bestSignal.confidence - 15, 25);
         logger.warn(
-          `[Trend Alignment] Signal ${bestSignal.signal} conflicts with H1 trend (${secondaryTrend}). ` +
+          `[${timeframe}] [Trend Alignment] ${bestSignal.signal} conflicts with ${alignmentTF} trend (${alignmentTrend}). ` +
             `Confidence reduced to ${bestSignal.confidence}%`
         );
       } else {
         bestSignal.confidence = Math.min(bestSignal.confidence + 5, 98);
-        logger.info(`[Trend Alignment] Confirmed - H1 trend is ${secondaryTrend}`);
+        logger.info(`[${timeframe}] [Trend Alignment] Confirmed - ${alignmentTF} trend is ${alignmentTrend}`);
       }
     }
 
     // Minimum confidence threshold
     if (bestSignal.confidence < 50) {
-      logger.info(
-        `Signal confidence too low (${bestSignal.confidence}%), skipping`
-      );
+      logger.info(`[${timeframe}] Signal confidence too low (${bestSignal.confidence}%), skipping`);
       return;
     }
 
@@ -139,33 +136,55 @@ async function runAnalysis() {
     );
 
     if (!riskParams || !riskManager.validate(riskParams)) {
-      logger.warn('Risk validation failed, signal discarded');
+      logger.warn(`[${timeframe}] Risk validation failed, signal discarded`);
       stats.errors++;
       return;
     }
 
     // ── STEP 8: Send Alert ──
-    await telegram.sendSignal(bestSignal, riskParams, config.primaryTimeframe);
+    await telegram.sendSignal(bestSignal, riskParams, timeframe);
 
     // Update stats
     stats.totalSignals++;
     if (bestSignal.signal === 'BUY') stats.buySignals++;
     else stats.sellSignals++;
     stats.confidenceSum += bestSignal.confidence;
-    stats.strategyCounts[bestSignal.strategy] =
-      (stats.strategyCounts[bestSignal.strategy] || 0) + 1;
+    const statKey = `${bestSignal.strategy} [${timeframe}]`;
+    stats.strategyCounts[statKey] = (stats.strategyCounts[statKey] || 0) + 1;
 
     logger.info(
-      `✓ Signal sent: ${bestSignal.signal} @ ${currentPrice.toFixed(2)} | ` +
+      `[${timeframe}] ✓ Signal sent: ${bestSignal.signal} @ ${currentPrice.toFixed(2)} | ` +
         `Strategy: ${bestSignal.strategy} | Confidence: ${bestSignal.confidence}%`
     );
   } catch (err) {
     stats.errors++;
-    logger.error(`Analysis cycle error: ${err.message}`, { stack: err.stack });
-    await telegram.sendMessage(`⚠️ Bot error: ${err.message}`).catch(() => {});
+    logger.error(`[${timeframe}] Analysis error: ${err.message}`, { stack: err.stack });
+    await telegram.sendMessage(`⚠️ Bot error [${timeframe}]: ${err.message}`).catch(() => {});
   }
 
-  logger.info(`Cycle completed in ${Date.now() - cycleStart}ms`);
+  logger.info(`[${timeframe}] Cycle completed in ${Date.now() - cycleStart}ms`);
+}
+
+/**
+ * Get the higher timeframe used for trend alignment.
+ */
+function getAlignmentTimeframe(tf) {
+  const map = {
+    '1min': '15min',
+    '5min': '1h',
+    '15min': '1h',
+    '30min': '4h',
+    '1h': '4h',
+    '4h': '1day',
+  };
+  return map[tf] || null;
+}
+
+/**
+ * Legacy wrapper: run analysis on primary timeframe only.
+ */
+async function runAnalysis() {
+  await runAnalysisForTimeframe(config.primaryTimeframe);
 }
 
 /**
@@ -225,16 +244,24 @@ async function start() {
   // Send startup notification
   await telegram.sendStartup();
 
-  // Schedule main analysis
-  logger.info(`Scheduling analysis: ${config.cronSchedule}`);
-  cron.schedule(config.cronSchedule, runAnalysis);
+  // Schedule analysis for each enabled timeframe
+  const timeframes = config.timeframes;
+  logger.info(`Active timeframes: ${timeframes.join(', ')}`);
+
+  for (const tf of timeframes) {
+    const schedule = config.cronSchedules[tf] || config.cronSchedule;
+    logger.info(`Scheduling [${tf}] analysis: ${schedule}`);
+    cron.schedule(schedule, () => runAnalysisForTimeframe(tf));
+  }
 
   // Schedule daily summary
   scheduleDailySummary();
 
-  // Run initial analysis
-  logger.info('Running initial analysis...');
-  await runAnalysis();
+  // Run initial analysis on all timeframes
+  logger.info('Running initial analysis on all timeframes...');
+  for (const tf of timeframes) {
+    await runAnalysisForTimeframe(tf);
+  }
 
   logger.info('Bot is running. Waiting for next scheduled cycle...');
 }

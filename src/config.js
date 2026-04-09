@@ -20,6 +20,8 @@ const config = {
 
   // Trading
   symbol: 'XAU/USD',
+  // Multi-timeframe: bot runs independent analysis on each enabled TF
+  timeframes: (process.env.TIMEFRAMES || '15min,1h').split(',').map((t) => t.trim()),
   primaryTimeframe: process.env.PRIMARY_TIMEFRAME || '15min',
   secondaryTimeframe: process.env.SECONDARY_TIMEFRAME || '1h',
   riskPercent: parseFloat(process.env.RISK_PERCENT) || 1.5,
@@ -79,8 +81,17 @@ const config = {
     breakEvenEnabled: true,
   },
 
-  // Cron
+  // Cron - separate schedules per timeframe
   cronSchedule: process.env.CRON_SCHEDULE || '*/15 * * * 1-5',
+  cronSchedules: {
+    '1min': '*/1 * * * 1-5',
+    '5min': '*/5 * * * 1-5',
+    '15min': '*/15 * * * 1-5',
+    '30min': '*/30 * * * 1-5',
+    '1h': '0 * * * 1-5',        // Every hour on the hour
+    '4h': '0 */4 * * 1-5',      // Every 4 hours
+    '1day': '0 0 * * 1-5',      // Daily at midnight
+  },
 
   // Logging
   logLevel: process.env.LOG_LEVEL || 'info',

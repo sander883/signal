@@ -125,16 +125,17 @@ Trading will resume during London or New York session.
       .map(([k]) => k)
       .join(', ');
 
+    const tfList = config.timeframes.join(', ');
+
     const message = `
 🚀 *XAUUSD Signal Bot Started*
 
 ⚙️ *Configuration:*
-📊 Timeframe: ${config.primaryTimeframe} / ${config.secondaryTimeframe}
+📊 Timeframes: ${tfList}
 🔧 Strategies: ${strategies}
 📰 News Filter: ${config.newsFilter.enabled ? '✅ ON' : '❌ OFF'}
 🕐 Session Filter: ${config.sessionFilter.enabled ? '✅ ON' : '❌ OFF'}
 ⚠️ Risk: ${config.riskPercent}% | RR: 1:${config.rewardRatio}
-⏰ Schedule: ${config.cronSchedule}
 
 🕐 ${new Date().toUTCString()}
     `.trim();
