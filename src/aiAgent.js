@@ -195,20 +195,27 @@ JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT
 
   /**
    * Call Minimax API with minimal tokens.
+   * M2 series uses OpenAI-compatible /chat/completions endpoint.
    */
   async _chat(prompt) {
     const { apiKey, model, baseUrl } = config.ai.minimax;
 
+    // M2 models use /chat/completions; legacy abab uses /text/chatcompletion_v2
+    const isM2 = model.toLowerCase().startsWith('minimax-m');
+    const endpoint = isM2
+      ? `${baseUrl}/chat/completions`
+      : `${baseUrl}/text/chatcompletion_v2`;
+
     const resp = await axios.post(
-      `${baseUrl}/text/chatcompletion_v2`,
+      endpoint,
       {
         model,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: prompt },
         ],
-        temperature: 0.2,   // Lower = more deterministic, fewer tokens wasted
-        max_tokens: 150,     // Force short response (was 500)
+        temperature: 0.2,
+        max_tokens: 150,
       },
       {
         headers: {
@@ -219,8 +226,12 @@ JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT
       }
     );
 
+    // Error handling for both API formats
     if (resp.data.base_resp && resp.data.base_resp.status_code !== 0) {
       throw new Error(`Minimax: ${resp.data.base_resp.status_msg}`);
+    }
+    if (resp.data.error) {
+      throw new Error(`Minimax: ${resp.data.error.message}`);
     }
 
     const content = resp.data.choices?.[0]?.message?.content;

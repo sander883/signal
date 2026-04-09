@@ -79,8 +79,7 @@ const config = {
     provider: process.env.AI_PROVIDER || 'minimax',
     minimax: {
       apiKey: process.env.MINIMAX_API_KEY || '',
-      // groupId not needed for v2 API — only API key required
-      model: process.env.MINIMAX_MODEL || 'abab6.5s-chat',
+      model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7-highspeed',
       baseUrl: process.env.MINIMAX_BASE_URL || 'https://api.minimax.chat/v1',
     },
     // Minimum AI confidence to keep signal (0-100). Below this = reject.
