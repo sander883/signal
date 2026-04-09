@@ -54,6 +54,7 @@ ${signal.confluence ? `🎯 *Strategies Agreeing:* ${signal.confluence}` : ''}
 
 ${riskParams.trailingStop?.enabled ? '🔄 *Trailing Stop:* Active' : ''}
 ${riskParams.breakEven?.enabled ? '⚖️ *Break Even:* Active' : ''}
+${signal.aiConfidence ? `\n🤖 *AI Validation:* ${signal.aiConfidence}% (${signal.aiSentiment})\n💬 ${signal.aiReason}` : ''}
 
 🕐 ${new Date().toUTCString()}
     `.trim();
@@ -95,6 +96,27 @@ Trading will resume during London or New York session.
   }
 
   /**
+   * Send AI rejection notification.
+   */
+  async sendAIReject(signal, aiResult, timeframe) {
+    const message = `
+🤖 *AI SIGNAL REVIEW — REJECTED*
+
+❌ ${signal.signal} signal rejected by AI
+📊 Strategy: ${signal.strategy}
+⏱ Timeframe: ${timeframe}
+📈 Strategy Confidence: ${signal.confidence}%
+🤖 AI Confidence: ${aiResult.confidence}%
+🧠 Sentiment: ${aiResult.sentiment}
+💬 Reason: ${aiResult.reason}
+
+🕐 ${new Date().toUTCString()}
+    `.trim();
+
+    await this._send(message);
+  }
+
+  /**
    * Send daily summary.
    */
   async sendDailySummary(stats) {
@@ -106,6 +128,7 @@ Trading will resume during London or New York session.
 🔴 Sell Signals: ${stats.sellSignals}
 🚫 Blocked by News: ${stats.newsBlocked}
 🕐 Blocked by Session: ${stats.sessionBlocked}
+🤖 Rejected by AI: ${stats.aiRejected || 0}
 📊 Avg Confidence: ${stats.avgConfidence}%
 
 🏆 Top Strategy: ${stats.topStrategy || 'N/A'}
@@ -135,6 +158,7 @@ Trading will resume during London or New York session.
 🔧 Strategies: ${strategies}
 📰 News Filter: ${config.newsFilter.enabled ? '✅ ON' : '❌ OFF'}
 🕐 Session Filter: ${config.sessionFilter.enabled ? '✅ ON' : '❌ OFF'}
+🤖 AI Agent: ${config.ai.enabled && config.ai.minimax.apiKey ? '✅ Minimax (' + config.ai.minimax.model + ')' : '❌ OFF'}
 ⚠️ Risk: ${config.riskPercent}% | RR: 1:${config.rewardRatio}
 
 🕐 ${new Date().toUTCString()}

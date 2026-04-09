@@ -73,6 +73,22 @@ const config = {
     atr: { period: 14 },
   },
 
+  // AI Agent (Minimax)
+  ai: {
+    enabled: process.env.AI_AGENT_ENABLED !== 'false',
+    provider: process.env.AI_PROVIDER || 'minimax',
+    minimax: {
+      apiKey: process.env.MINIMAX_API_KEY || '',
+      groupId: process.env.MINIMAX_GROUP_ID || '',
+      model: process.env.MINIMAX_MODEL || 'abab6.5s-chat',
+      baseUrl: process.env.MINIMAX_BASE_URL || 'https://api.minimax.chat/v1',
+    },
+    // Minimum AI confidence to keep signal (0-100). Below this = reject.
+    minConfidence: parseInt(process.env.AI_MIN_CONFIDENCE) || 40,
+    // When AI is unavailable, should signals still pass?
+    fallbackAllow: process.env.AI_FALLBACK_ALLOW !== 'false',
+  },
+
   // Risk Management
   risk: {
     atrMultiplierSL: 1.5,

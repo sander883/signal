@@ -7,6 +7,7 @@ const strategies = require('./strategies');
 const newsFilter = require('./filters/newsFilter');
 const sessionFilter = require('./filters/sessionFilter');
 const riskManager = require('./risk');
+const aiAgent = require('./aiAgent');
 const telegram = require('./telegram');
 
 // Performance tracking
@@ -141,7 +142,44 @@ async function runAnalysisForTimeframe(timeframe) {
       return;
     }
 
-    // ── STEP 8: Send Alert ──
+    // ── STEP 8: AI Agent Validation ──
+    const aiResult = await aiAgent.validateSignal(bestSignal, riskParams, {
+      currentPrice,
+      timeframe,
+      alignmentTrend,
+      session: session.session,
+      rsi: indicators.latest(indData.rsi),
+      atr: indicators.latest(indData.atr),
+      ema50: indicators.latest(indData.ema50),
+      ema200: indicators.latest(indData.ema200),
+      bbUpper: indicators.latest(indData.bb)?.upper ?? null,
+      bbLower: indicators.latest(indData.bb)?.lower ?? null,
+      recentCandles: candles.slice(-10),
+    });
+
+    if (!aiResult.approved) {
+      stats.aiRejected = (stats.aiRejected || 0) + 1;
+      logger.warn(
+        `[${timeframe}] [AI REJECTED] ${bestSignal.signal} signal — ${aiResult.reason}`
+      );
+      await telegram.sendAIReject(bestSignal, aiResult, timeframe);
+      return;
+    }
+
+    // Apply AI adjustments to risk params if provided
+    if (aiResult.adjustedSignal) {
+      if (aiResult.adjustedSignal.entryPrice) riskParams.entryPrice = aiResult.adjustedSignal.entryPrice;
+      if (aiResult.adjustedSignal.stopLoss) riskParams.stopLoss = aiResult.adjustedSignal.stopLoss;
+      if (aiResult.adjustedSignal.takeProfit) riskParams.takeProfit = aiResult.adjustedSignal.takeProfit;
+      logger.info(`[${timeframe}] [AI] Adjusted levels applied`);
+    }
+
+    // Blend AI confidence into signal
+    bestSignal.aiConfidence = aiResult.confidence;
+    bestSignal.aiSentiment = aiResult.sentiment;
+    bestSignal.aiReason = aiResult.reason;
+
+    // ── STEP 9: Send Alert ──
     await telegram.sendSignal(bestSignal, riskParams, timeframe);
 
     // Update stats
@@ -154,7 +192,8 @@ async function runAnalysisForTimeframe(timeframe) {
 
     logger.info(
       `[${timeframe}] ✓ Signal sent: ${bestSignal.signal} @ ${currentPrice.toFixed(2)} | ` +
-        `Strategy: ${bestSignal.strategy} | Confidence: ${bestSignal.confidence}%`
+        `Strategy: ${bestSignal.strategy} | Confidence: ${bestSignal.confidence}% | ` +
+        `AI: ${aiResult.confidence}% (${aiResult.sentiment})`
     );
   } catch (err) {
     stats.errors++;
@@ -207,6 +246,7 @@ function scheduleDailySummary() {
       sellSignals: stats.sellSignals,
       newsBlocked: stats.newsBlocked,
       sessionBlocked: stats.sessionBlocked,
+      aiRejected: stats.aiRejected || 0,
       avgConfidence: avgConf,
       topStrategy: topStrategy ? `${topStrategy[0]} (${topStrategy[1]})` : 'N/A',
     });
@@ -217,6 +257,7 @@ function scheduleDailySummary() {
     stats.sellSignals = 0;
     stats.newsBlocked = 0;
     stats.sessionBlocked = 0;
+    stats.aiRejected = 0;
     stats.confidenceSum = 0;
     stats.strategyCounts = {};
   });
@@ -235,6 +276,9 @@ async function start() {
 
   // Initialize Telegram
   telegram.init();
+
+  // Initialize AI Agent
+  aiAgent.init();
 
   // Pre-fetch news events
   logger.info('Loading economic calendar...');
