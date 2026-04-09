@@ -87,6 +87,17 @@ const config = {
     minConfidence: parseInt(process.env.AI_MIN_CONFIDENCE) || 40,
     // When AI is unavailable, should signals still pass?
     fallbackAllow: process.env.AI_FALLBACK_ALLOW !== 'false',
+
+    // ── Token-saving settings ──
+    // Only call AI when confidence is in this "uncertain" range.
+    // High confidence (>=85) = auto-approve. Low (<50) = already filtered.
+    // AI only reviews the grey zone in between.
+    smartGateMin: parseInt(process.env.AI_GATE_MIN) || 50,
+    smartGateMax: parseInt(process.env.AI_GATE_MAX) || 84,
+    // Max AI calls per hour (0 = unlimited)
+    maxCallsPerHour: parseInt(process.env.AI_MAX_CALLS_HOUR) || 10,
+    // Cache identical signal direction for N minutes (skip duplicate calls)
+    dedupeMinutes: parseInt(process.env.AI_DEDUPE_MIN) || 15,
   },
 
   // Risk Management

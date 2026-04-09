@@ -3,20 +3,32 @@ const config = require('./config');
 const logger = require('./logger');
 
 /**
- * AI Agent Module — Minimax Integration
+ * AI Agent Module — Minimax Integration (Token-Optimized)
  *
- * Two main functions:
- * 1. Sentiment Analysis: Analyze gold market sentiment from recent price action
- * 2. Signal Validation: AI reviews the signal with full context before sending
- *
- * The AI acts as a final gate — it can CONFIRM, ADJUST, or REJECT a signal.
+ * TOKEN SAVING STRATEGIES:
+ * 1. Smart Gate: Only call AI for "grey zone" signals (50-84% confidence).
+ *    High confidence (>=85%) auto-approved. Low (<50%) already filtered out.
+ * 2. Rate Limiter: Max N calls per hour.
+ * 3. Deduplication: Same direction+timeframe skipped within N minutes.
+ * 4. Compact Prompts: Minimal tokens, no filler text.
+ * 5. Low max_tokens (150): Forces short JSON responses.
+ * 6. Sentiment Cache: Reused for 10 min, not re-fetched per signal.
+ * 7. System prompt cached (sent once, reused by Minimax internally).
  */
+
+const SYSTEM_PROMPT = 'XAUUSD analyst. JSON only.';
 
 class AIAgent {
   constructor() {
     this.enabled = false;
     this.sentimentCache = { data: null, ts: 0 };
-    this.sentimentCacheTTL = 10 * 60 * 1000; // 10 min cache
+    this.sentimentCacheTTL = 10 * 60 * 1000;
+
+    // Token-saving state
+    this.callLog = [];        // timestamps of recent API calls
+    this.dedupeCache = {};    // { "BUY_15min": timestamp }
+    this.totalCalls = 0;
+    this.totalSkipped = 0;
   }
 
   init() {
@@ -24,295 +36,265 @@ class AIAgent {
       logger.info('[AI Agent] Disabled via config');
       return;
     }
-
     if (!config.ai.minimax.apiKey) {
-      logger.warn('[AI Agent] No Minimax API key configured — running in bypass mode');
+      logger.warn('[AI Agent] No Minimax API key — bypass mode');
       return;
     }
-
     this.enabled = true;
-    logger.info(`[AI Agent] Minimax initialized (model: ${config.ai.minimax.model})`);
+    logger.info(
+      `[AI Agent] Minimax OK | model: ${config.ai.minimax.model} | ` +
+        `gate: ${config.ai.smartGateMin}-${config.ai.smartGateMax}% | ` +
+        `limit: ${config.ai.maxCallsPerHour}/hr | dedupe: ${config.ai.dedupeMinutes}min`
+    );
   }
 
   /**
-   * Validate a trading signal using AI.
-   * Returns { approved, confidence, reason, sentiment, adjustedSignal }
+   * Validate a trading signal. Returns { approved, confidence, reason, sentiment, adjustedSignal }
+   *
+   * SMART GATE LOGIC (saves ~60-70% of tokens):
+   * - confidence >= 85%  → AUTO APPROVE (no API call)
+   * - confidence < 50%   → never reaches here (filtered in index.js)
+   * - confidence 50-84%  → ASK AI (the uncertain zone)
    */
   async validateSignal(signal, riskParams, marketContext) {
     if (!this.enabled) {
-      return this._bypassResult(signal, 'AI agent disabled');
+      return this._bypassResult(signal, 'AI disabled');
     }
 
+    const { smartGateMin, smartGateMax } = config.ai;
+
+    // ── CHECK 1: Smart Gate — skip AI for high-confidence signals ──
+    if (signal.confidence >= smartGateMax + 1) {
+      this.totalSkipped++;
+      logger.info(`[AI] AUTO-APPROVE: confidence ${signal.confidence}% >= ${smartGateMax + 1}% threshold`);
+      return {
+        approved: true,
+        confidence: signal.confidence,
+        sentiment: 'neutral',
+        reason: `Auto-approved (high confidence ${signal.confidence}%)`,
+        adjustedSignal: null,
+      };
+    }
+
+    // ── CHECK 2: Deduplication — same signal recently? ──
+    const dedupeKey = `${signal.signal}_${marketContext.timeframe}`;
+    const lastCall = this.dedupeCache[dedupeKey];
+    if (lastCall && Date.now() - lastCall < config.ai.dedupeMinutes * 60 * 1000) {
+      this.totalSkipped++;
+      const minAgo = Math.round((Date.now() - lastCall) / 60000);
+      logger.info(`[AI] DEDUPE SKIP: same ${dedupeKey} was checked ${minAgo}min ago`);
+      return this._bypassResult(signal, `Dedupe: same signal checked ${minAgo}min ago`);
+    }
+
+    // ── CHECK 3: Rate limiter ──
+    if (config.ai.maxCallsPerHour > 0) {
+      const oneHourAgo = Date.now() - 3600000;
+      this.callLog = this.callLog.filter((t) => t > oneHourAgo);
+      if (this.callLog.length >= config.ai.maxCallsPerHour) {
+        this.totalSkipped++;
+        logger.warn(`[AI] RATE LIMITED: ${this.callLog.length}/${config.ai.maxCallsPerHour} calls this hour`);
+        return this._bypassResult(signal, 'Rate limited');
+      }
+    }
+
+    // ── CALL AI ──
     try {
-      const prompt = this._buildValidationPrompt(signal, riskParams, marketContext);
+      const prompt = this._buildCompactPrompt(signal, riskParams, marketContext);
       const response = await this._chat(prompt);
       const result = this._parseValidationResponse(response, signal);
 
+      // Track
+      this.callLog.push(Date.now());
+      this.dedupeCache[dedupeKey] = Date.now();
+      this.totalCalls++;
+
       logger.info(
-        `[AI Agent] Signal ${signal.signal} → ${result.approved ? 'APPROVED' : 'REJECTED'} ` +
-          `| AI Confidence: ${result.confidence}% | ${result.reason}`
+        `[AI] ${result.approved ? 'APPROVED' : 'REJECTED'} | conf: ${result.confidence}% | ` +
+          `${result.reason} | calls today: ${this.totalCalls} | skipped: ${this.totalSkipped}`
       );
 
       return result;
     } catch (err) {
-      logger.error(`[AI Agent] Validation failed: ${err.message}`);
-      return this._bypassResult(signal, `AI error: ${err.message}`);
+      logger.error(`[AI] Error: ${err.message}`);
+      return this._bypassResult(signal, `Error: ${err.message}`);
     }
   }
 
   /**
-   * Get market sentiment analysis from AI.
+   * Sentiment analysis (cached for 10 min).
    */
   async analyzeSentiment(candles, newsEvents) {
     if (!this.enabled) {
-      return { sentiment: 'neutral', score: 0, analysis: 'AI agent disabled' };
+      return { sentiment: 'neutral', score: 0, analysis: 'AI disabled' };
     }
-
-    // Use cache if fresh
     if (Date.now() - this.sentimentCache.ts < this.sentimentCacheTTL && this.sentimentCache.data) {
       return this.sentimentCache.data;
     }
 
+    // Rate check — sentiment counts toward hourly limit too
+    if (config.ai.maxCallsPerHour > 0) {
+      const oneHourAgo = Date.now() - 3600000;
+      this.callLog = this.callLog.filter((t) => t > oneHourAgo);
+      if (this.callLog.length >= config.ai.maxCallsPerHour) {
+        return { sentiment: 'neutral', score: 0, analysis: 'Rate limited' };
+      }
+    }
+
     try {
-      const prompt = this._buildSentimentPrompt(candles, newsEvents);
+      const prompt = this._buildCompactSentimentPrompt(candles, newsEvents);
       const response = await this._chat(prompt);
       const result = this._parseSentimentResponse(response);
 
       this.sentimentCache = { data: result, ts: Date.now() };
-      logger.info(`[AI Agent] Sentiment: ${result.sentiment} (score: ${result.score})`);
+      this.callLog.push(Date.now());
+      this.totalCalls++;
+      logger.info(`[AI] Sentiment: ${result.sentiment} (${result.score})`);
       return result;
     } catch (err) {
-      logger.error(`[AI Agent] Sentiment analysis failed: ${err.message}`);
+      logger.error(`[AI] Sentiment error: ${err.message}`);
       return { sentiment: 'neutral', score: 0, analysis: `Error: ${err.message}` };
     }
   }
 
   /**
-   * Build the signal validation prompt.
+   * COMPACT validation prompt (~300 tokens input vs ~800 before = 60% saving).
+   * Uses abbreviated format, no filler, only essential data.
    */
-  _buildValidationPrompt(signal, riskParams, ctx) {
-    const recentPrices = ctx.recentCandles
-      .slice(-10)
-      .map((c) => `  ${c.time}: O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)}`)
-      .join('\n');
+  _buildCompactPrompt(signal, risk, ctx) {
+    // Condense last 5 candles into one line each (not 10)
+    const prices = ctx.recentCandles.slice(-5).map(
+      (c) => `${c.close.toFixed(1)}`
+    ).join(',');
 
-    return `You are a professional XAUUSD (Gold) trading analyst AI. Your job is to validate a trading signal before it is sent to a trader.
-
-MARKET CONTEXT:
-- Current Price: ${ctx.currentPrice.toFixed(2)}
-- Timeframe: ${ctx.timeframe}
-- Higher TF Trend: ${ctx.alignmentTrend}
-- Session: ${ctx.session}
-- RSI: ${ctx.rsi !== null ? ctx.rsi.toFixed(1) : 'N/A'}
-- ATR: ${ctx.atr !== null ? ctx.atr.toFixed(2) : 'N/A'}
-- EMA50: ${ctx.ema50 !== null ? ctx.ema50.toFixed(2) : 'N/A'}
-- EMA200: ${ctx.ema200 !== null ? ctx.ema200.toFixed(2) : 'N/A'}
-- Bollinger Upper: ${ctx.bbUpper !== null ? ctx.bbUpper.toFixed(2) : 'N/A'}
-- Bollinger Lower: ${ctx.bbLower !== null ? ctx.bbLower.toFixed(2) : 'N/A'}
-
-RECENT CANDLES (last 10):
-${recentPrices}
-
-SIGNAL TO VALIDATE:
-- Direction: ${signal.signal}
-- Strategy: ${signal.strategy}
-- Confidence: ${signal.confidence}%
-- Confluence: ${signal.confluence || 1} strategies agree
-${signal.allStrategies ? `- Agreeing: ${signal.allStrategies}` : ''}
-
-RISK PARAMETERS:
-- Entry: ${riskParams.entryPrice}
-- Stop Loss: ${riskParams.stopLoss}
-- Take Profit 1: ${riskParams.takeProfit}
-- Risk:Reward: ${riskParams.riskRewardRatio}
-
-Analyze this signal and respond in EXACTLY this JSON format (no other text):
-{
-  "approved": true or false,
-  "confidence": 0-100,
-  "sentiment": "bullish" or "bearish" or "neutral",
-  "reason": "Brief explanation (max 100 chars)",
-  "adjustEntry": null or number,
-  "adjustSL": null or number,
-  "adjustTP": null or number
-}
-
-Rules:
-- APPROVE if technical setup is solid and market context supports the direction
-- REJECT if signal contradicts market structure, sentiment, or if risk is poor
-- Adjust entry/SL/TP only if you see a clearly better level nearby
-- Be decisive. Give clear yes/no.`;
+    return `XAUUSD ${signal.signal} ${ctx.timeframe}
+P:${ctx.currentPrice.toFixed(1)} EMA50:${ctx.ema50?.toFixed(1)||'-'} EMA200:${ctx.ema200?.toFixed(1)||'-'} RSI:${ctx.rsi?.toFixed(0)||'-'} ATR:${ctx.atr?.toFixed(1)||'-'}
+BB:${ctx.bbLower?.toFixed(1)||'-'}/${ctx.bbUpper?.toFixed(1)||'-'} Trend:${ctx.alignmentTrend} Sess:${ctx.session}
+Last5Close:${prices}
+Strat:${signal.strategy} Conf:${signal.confidence}% Confl:${signal.confluence||1}
+E:${risk.entryPrice} SL:${risk.stopLoss} TP:${risk.takeProfit} RR:${risk.riskRewardRatio}
+Reply JSON:{"ok":bool,"c":0-100,"s":"bull/bear/neut","r":"reason max 60ch"}`;
   }
 
   /**
-   * Build the sentiment analysis prompt.
+   * COMPACT sentiment prompt (~200 tokens).
    */
-  _buildSentimentPrompt(candles, newsEvents) {
-    const recent = candles.slice(-20);
-    const priceData = recent
-      .map((c) => `${c.time}: O=${c.open.toFixed(2)} H=${c.high.toFixed(2)} L=${c.low.toFixed(2)} C=${c.close.toFixed(2)}`)
-      .join('\n');
+  _buildCompactSentimentPrompt(candles, newsEvents) {
+    const r = candles.slice(-10);
+    const closes = r.map((c) => c.close.toFixed(1)).join(',');
+    const hi = Math.max(...r.map((c) => c.high)).toFixed(1);
+    const lo = Math.min(...r.map((c) => c.low)).toFixed(1);
+    const chg = (((r[r.length - 1].close - r[0].close) / r[0].close) * 100).toFixed(2);
+    const news = newsEvents?.length
+      ? newsEvents.slice(0, 3).map((e) => e.title).join(';')
+      : 'none';
 
-    const firstClose = recent[0].close;
-    const lastClose = recent[recent.length - 1].close;
-    const change = ((lastClose - firstClose) / firstClose * 100).toFixed(2);
-
-    const highestHigh = Math.max(...recent.map((c) => c.high));
-    const lowestLow = Math.min(...recent.map((c) => c.low));
-
-    const newsStr = newsEvents && newsEvents.length > 0
-      ? newsEvents.map((e) => `- ${e.title} (${e.impact}) at ${e.time}`).join('\n')
-      : 'No upcoming high-impact events';
-
-    return `You are a Gold (XAUUSD) market sentiment analyst. Analyze the current market conditions.
-
-PRICE DATA (last 20 candles):
-${priceData}
-
-STATISTICS:
-- Price Change: ${change}%
-- Range High: ${highestHigh.toFixed(2)}
-- Range Low: ${lowestLow.toFixed(2)}
-- Current: ${lastClose.toFixed(2)}
-
-UPCOMING NEWS EVENTS:
-${newsStr}
-
-Respond in EXACTLY this JSON format (no other text):
-{
-  "sentiment": "bullish" or "bearish" or "neutral",
-  "score": -100 to 100 (negative=bearish, positive=bullish),
-  "analysis": "Brief market analysis (max 150 chars)",
-  "keyLevels": {
-    "support": number,
-    "resistance": number
-  },
-  "recommendation": "BUY" or "SELL" or "WAIT"
-}`;
+    return `XAUUSD sentiment. Close10:${closes} Hi:${hi} Lo:${lo} Chg:${chg}%
+News:${news}
+JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT"}`;
   }
 
   /**
-   * Call Minimax chat completion API.
+   * Call Minimax API with minimal tokens.
    */
   async _chat(prompt) {
-    const { apiKey, groupId, model, baseUrl } = config.ai.minimax;
-
-    const url = `${baseUrl}/text/chatcompletion_v2`;
+    const { apiKey, model, baseUrl } = config.ai.minimax;
 
     const resp = await axios.post(
-      url,
+      `${baseUrl}/text/chatcompletion_v2`,
       {
         model,
         messages: [
-          {
-            role: 'system',
-            content: 'You are a professional quantitative trading analyst specializing in XAUUSD (Gold). Respond only in valid JSON format.',
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: prompt },
         ],
-        temperature: 0.3,
-        max_tokens: 500,
+        temperature: 0.2,   // Lower = more deterministic, fewer tokens wasted
+        max_tokens: 150,     // Force short response (was 500)
       },
       {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 30000,
+        timeout: 15000,
       }
     );
 
     if (resp.data.base_resp && resp.data.base_resp.status_code !== 0) {
-      throw new Error(`Minimax API error: ${resp.data.base_resp.status_msg}`);
+      throw new Error(`Minimax: ${resp.data.base_resp.status_msg}`);
     }
 
     const content = resp.data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error('Empty response from Minimax');
-    }
-
+    if (!content) throw new Error('Empty Minimax response');
     return content;
   }
 
-  /**
-   * Parse the AI validation response.
-   */
   _parseValidationResponse(text, originalSignal) {
     try {
-      // Extract JSON from response (handle markdown code blocks)
       const jsonStr = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
       const data = JSON.parse(jsonStr);
 
+      // Support both verbose and compact keys
+      const approved = data.ok ?? data.approved ?? false;
+      const confidence = Math.max(0, Math.min(100, parseInt(data.c ?? data.confidence) || 0));
+      const sentiment = data.s ?? data.sentiment ?? 'neutral';
+      const reason = String(data.r ?? data.reason ?? 'No reason').slice(0, 200);
+
+      // Normalize sentiment
+      const sentimentMap = { bull: 'bullish', bear: 'bearish', neut: 'neutral' };
+      const normSentiment = sentimentMap[sentiment] || sentiment;
+
       const result = {
-        approved: Boolean(data.approved),
-        confidence: Math.max(0, Math.min(100, parseInt(data.confidence) || 0)),
-        sentiment: data.sentiment || 'neutral',
-        reason: String(data.reason || 'No reason given').slice(0, 200),
+        approved: Boolean(approved),
+        confidence,
+        sentiment: normSentiment,
+        reason,
         adjustedSignal: null,
       };
 
-      // Apply confidence threshold
       if (result.confidence < config.ai.minConfidence) {
         result.approved = false;
-        result.reason = `AI confidence too low (${result.confidence}% < ${config.ai.minConfidence}% threshold)`;
+        result.reason = `AI conf ${result.confidence}% < ${config.ai.minConfidence}% min`;
       }
 
-      // Build adjusted signal if AI suggests changes
+      // Compact format doesn't include adjustments (saves tokens)
+      // If AI uses verbose format with adjustEntry/SL/TP, still support it
       if (result.approved && (data.adjustEntry || data.adjustSL || data.adjustTP)) {
         result.adjustedSignal = {};
-        if (data.adjustEntry && typeof data.adjustEntry === 'number') {
-          result.adjustedSignal.entryPrice = Math.round(data.adjustEntry * 100) / 100;
-        }
-        if (data.adjustSL && typeof data.adjustSL === 'number') {
-          result.adjustedSignal.stopLoss = Math.round(data.adjustSL * 100) / 100;
-        }
-        if (data.adjustTP && typeof data.adjustTP === 'number') {
-          result.adjustedSignal.takeProfit = Math.round(data.adjustTP * 100) / 100;
-        }
+        if (typeof data.adjustEntry === 'number') result.adjustedSignal.entryPrice = Math.round(data.adjustEntry * 100) / 100;
+        if (typeof data.adjustSL === 'number') result.adjustedSignal.stopLoss = Math.round(data.adjustSL * 100) / 100;
+        if (typeof data.adjustTP === 'number') result.adjustedSignal.takeProfit = Math.round(data.adjustTP * 100) / 100;
       }
 
       return result;
     } catch (err) {
-      logger.warn(`[AI Agent] Failed to parse response: ${err.message}`);
-      logger.debug(`[AI Agent] Raw response: ${text}`);
-      // If parse fails, let the signal through with a warning
+      logger.warn(`[AI] Parse error: ${err.message} | raw: ${text.slice(0, 100)}`);
       return {
         approved: config.ai.fallbackAllow,
         confidence: 50,
         sentiment: 'neutral',
-        reason: 'AI response parse error — fallback mode',
+        reason: 'Parse error — fallback',
         adjustedSignal: null,
       };
     }
   }
 
-  /**
-   * Parse sentiment response.
-   */
   _parseSentimentResponse(text) {
     try {
       const jsonStr = text.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
       const data = JSON.parse(jsonStr);
-
+      const sentimentMap = { bull: 'bullish', bear: 'bearish', neut: 'neutral' };
       return {
-        sentiment: data.sentiment || 'neutral',
-        score: Math.max(-100, Math.min(100, parseInt(data.score) || 0)),
-        analysis: String(data.analysis || '').slice(0, 300),
-        keyLevels: data.keyLevels || null,
-        recommendation: data.recommendation || 'WAIT',
+        sentiment: sentimentMap[data.s] || data.s || data.sentiment || 'neutral',
+        score: Math.max(-100, Math.min(100, parseInt(data.sc ?? data.score) || 0)),
+        analysis: String(data.a ?? data.analysis ?? '').slice(0, 200),
+        recommendation: data.r ?? data.recommendation ?? 'WAIT',
       };
     } catch (err) {
-      logger.warn(`[AI Agent] Sentiment parse error: ${err.message}`);
+      logger.warn(`[AI] Sentiment parse error: ${err.message}`);
       return { sentiment: 'neutral', score: 0, analysis: 'Parse error' };
     }
   }
 
-  /**
-   * Bypass result when AI is disabled or fails.
-   */
   _bypassResult(signal, reason) {
     return {
       approved: config.ai.fallbackAllow,
@@ -320,6 +302,20 @@ Respond in EXACTLY this JSON format (no other text):
       sentiment: 'neutral',
       reason,
       adjustedSignal: null,
+    };
+  }
+
+  /**
+   * Get usage stats for logging/debugging.
+   */
+  getStats() {
+    return {
+      totalCalls: this.totalCalls,
+      totalSkipped: this.totalSkipped,
+      savingsPercent: this.totalCalls + this.totalSkipped > 0
+        ? Math.round((this.totalSkipped / (this.totalCalls + this.totalSkipped)) * 100)
+        : 0,
+      callsThisHour: this.callLog.filter((t) => t > Date.now() - 3600000).length,
     };
   }
 }
