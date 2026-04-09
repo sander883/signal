@@ -91,26 +91,36 @@ class Backtester {
 
   /**
    * Simulate a trade forward from entry.
+   * Includes spread and slippage for realistic results.
    */
   _simulateTrade(direction, entry, sl, tp, futureCandles) {
     if (!futureCandles.length) return null;
+
+    // Realistic adjustments
+    const spread = config.risk.spreadPoints || 0.30;
+    const slippage = 0.10; // typical slippage on gold
+
+    // Adjust entry for spread (buy = ask, sell = bid)
+    const realEntry = direction === 'BUY' ? entry + spread : entry - spread;
+    // SL slippage makes losses slightly worse
+    const realSL = direction === 'BUY' ? sl - slippage : sl + slippage;
 
     for (let i = 0; i < Math.min(futureCandles.length, 50); i++) {
       const candle = futureCandles[i];
 
       if (direction === 'BUY') {
-        // Check SL hit (low touches SL)
-        if (candle.low <= sl) {
-          return { result: 'LOSS', exitPrice: sl, barsHeld: i + 1 };
+        // Check SL hit first (worst case within candle)
+        if (candle.low <= realSL) {
+          return { result: 'LOSS', exitPrice: realSL, barsHeld: i + 1 };
         }
-        // Check TP hit (high touches TP)
+        // Check TP hit
         if (candle.high >= tp) {
           return { result: 'WIN', exitPrice: tp, barsHeld: i + 1 };
         }
       } else {
         // SELL
-        if (candle.high >= sl) {
-          return { result: 'LOSS', exitPrice: sl, barsHeld: i + 1 };
+        if (candle.high >= realSL) {
+          return { result: 'LOSS', exitPrice: realSL, barsHeld: i + 1 };
         }
         if (candle.low <= tp) {
           return { result: 'WIN', exitPrice: tp, barsHeld: i + 1 };

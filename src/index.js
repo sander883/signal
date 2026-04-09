@@ -17,11 +17,16 @@ const stats = {
   sellSignals: 0,
   newsBlocked: 0,
   sessionBlocked: 0,
+  aiRejected: 0,
   errors: 0,
   confidenceSum: 0,
   strategyCounts: {},
   startTime: new Date(),
 };
+
+// Duplicate signal protection: tracks last signal per timeframe
+const lastSignalSent = {}; // { "15min": { direction: "BUY", time: Date.now(), price: 2345 } }
+const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown per timeframe
 
 /**
  * Run analysis for a SINGLE timeframe.
@@ -166,12 +171,34 @@ async function runAnalysisForTimeframe(timeframe) {
       return;
     }
 
-    // Apply AI adjustments to risk params if provided
+    // Apply AI adjustments to risk params if provided, then re-validate
     if (aiResult.adjustedSignal) {
       if (aiResult.adjustedSignal.entryPrice) riskParams.entryPrice = aiResult.adjustedSignal.entryPrice;
       if (aiResult.adjustedSignal.stopLoss) riskParams.stopLoss = aiResult.adjustedSignal.stopLoss;
       if (aiResult.adjustedSignal.takeProfit) riskParams.takeProfit = aiResult.adjustedSignal.takeProfit;
+      // Recalculate distances after adjustment
+      riskParams.slDistance = Math.abs(riskParams.entryPrice - riskParams.stopLoss);
+      riskParams.tpDistance = Math.abs(riskParams.takeProfit - riskParams.entryPrice);
       logger.info(`[${timeframe}] [AI] Adjusted levels applied`);
+
+      // Re-validate after AI adjustments
+      if (!riskManager.validate(riskParams)) {
+        logger.warn(`[${timeframe}] AI-adjusted risk params invalid, discarding`);
+        stats.errors++;
+        return;
+      }
+    }
+
+    // ── Duplicate Signal Protection ──
+    const lastSig = lastSignalSent[timeframe];
+    if (
+      lastSig &&
+      lastSig.direction === bestSignal.signal &&
+      Date.now() - lastSig.time < SIGNAL_COOLDOWN_MS
+    ) {
+      const minAgo = Math.round((Date.now() - lastSig.time) / 60000);
+      logger.info(`[${timeframe}] Duplicate ${bestSignal.signal} signal skipped (sent ${minAgo}min ago)`);
+      return;
     }
 
     // Blend AI confidence into signal
@@ -181,6 +208,13 @@ async function runAnalysisForTimeframe(timeframe) {
 
     // ── STEP 9: Send Alert ──
     await telegram.sendSignal(bestSignal, riskParams, timeframe);
+
+    // Track for duplicate protection
+    lastSignalSent[timeframe] = {
+      direction: bestSignal.signal,
+      time: Date.now(),
+      price: currentPrice,
+    };
 
     // Update stats
     stats.totalSignals++;

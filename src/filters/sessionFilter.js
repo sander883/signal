@@ -13,6 +13,7 @@ const logger = require('../logger');
  * - Asian session (low gold volatility)
  * - Market rollover (00:00 - 01:00 UTC)
  * - Weekend (Saturday/Sunday)
+ * - Friday late session (21:00+ UTC, liquidity drops)
  */
 
 class SessionFilter {
@@ -36,6 +37,13 @@ class SessionFilter {
       return { allowed: false, session: 'weekend', reason };
     }
 
+    // Friday late session — liquidity drops, wider spreads
+    if (utcDay === 5 && utcHour >= 20) {
+      const reason = 'Friday late session — market closing';
+      logger.info(`[Session Filter] ${reason}`);
+      return { allowed: false, session: 'friday-close', reason };
+    }
+
     // Rollover period (avoid)
     if (utcHour >= 0 && utcHour < 1) {
       const reason = 'Market rollover period (00:00-01:00 UTC)';
@@ -45,12 +53,16 @@ class SessionFilter {
 
     const { london, newYork } = config.sessionFilter;
 
-    // London + New York overlap (best time)
-    if (utcHour >= newYork.start && utcHour < london.end) {
+    // Compute overlap dynamically (safe if config changes)
+    const overlapStart = Math.max(london.start, newYork.start);
+    const overlapEnd = Math.min(london.end, newYork.end);
+
+    // London + New York overlap (best time for gold)
+    if (overlapStart < overlapEnd && utcHour >= overlapStart && utcHour < overlapEnd) {
       return {
         allowed: true,
         session: 'london-newyork-overlap',
-        reason: 'London/NY overlap - optimal trading',
+        reason: `London/NY overlap (${overlapStart}:00-${overlapEnd}:00 UTC) — optimal`,
       };
     }
 
@@ -72,8 +84,8 @@ class SessionFilter {
       };
     }
 
-    // Outside active sessions (Asian / late NY)
-    const reason = `Outside active sessions (current UTC hour: ${utcHour})`;
+    // Outside active sessions
+    const reason = `Outside active sessions (UTC ${utcHour}:00)`;
     logger.info(`[Session Filter] ${reason}`);
     return { allowed: false, session: 'inactive', reason };
   }
@@ -82,13 +94,17 @@ class SessionFilter {
    * Get the current session name for display.
    */
   getCurrentSession() {
+    const { london, newYork } = config.sessionFilter;
     const now = new Date();
     const h = now.getUTCHours();
 
-    if (h >= 12 && h < 16) return 'London/NY Overlap';
-    if (h >= 7 && h < 16) return 'London';
-    if (h >= 12 && h < 21) return 'New York';
-    if (h >= 0 && h < 7) return 'Asian (inactive)';
+    const overlapStart = Math.max(london.start, newYork.start);
+    const overlapEnd = Math.min(london.end, newYork.end);
+
+    if (h >= overlapStart && h < overlapEnd) return 'London/NY Overlap';
+    if (h >= london.start && h < london.end) return 'London';
+    if (h >= newYork.start && h < newYork.end) return 'New York';
+    if (h >= 0 && h < london.start) return 'Asian (inactive)';
     return 'Off-hours';
   }
 }

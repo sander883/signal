@@ -8,14 +8,20 @@ const logger = require('./logger');
  * Calculates:
  * - ATR-based Stop Loss
  * - Take Profit based on Risk:Reward ratio
- * - Position sizing based on risk percentage
+ * - Position sizing (lot size) based on risk percentage
  * - Trailing stop levels
  * - Break-even levels
  */
 
+// XAUUSD pip/lot constants
+const PIP_SIZE = 0.01;           // 1 pip = $0.01 price movement
+const LOT_PIP_VALUE = 1.0;       // $1 per pip per standard lot (100 oz)
+const MIN_LOT = 0.01;
+const MAX_LOT = 100;
+
 class RiskManager {
   /**
-   * Calculate stop loss, take profit, and position info for a signal.
+   * Calculate stop loss, take profit, position size, and risk info.
    * @param {string} direction - 'BUY' or 'SELL'
    * @param {number} entryPrice - Current entry price
    * @param {Array} atrValues - ATR array from indicators
@@ -32,14 +38,16 @@ class RiskManager {
     const slMultiplier = options.slMultiplier || config.risk.atrMultiplierSL;
     const rrRatio = options.rrRatio || config.rewardRatio;
     const riskPercent = options.riskPercent || config.riskPercent;
+    const accountBalance = options.accountBalance || config.risk.accountBalance;
+    const spread = options.spread || config.risk.spreadPoints;
 
     let stopLoss, takeProfit, takeProfit2, takeProfit3;
 
     if (direction === 'BUY') {
       stopLoss = entryPrice - atr * slMultiplier;
-      takeProfit = entryPrice + atr * slMultiplier * rrRatio;          // TP1 (1:2)
-      takeProfit2 = entryPrice + atr * slMultiplier * (rrRatio + 1);   // TP2 (1:3)
-      takeProfit3 = entryPrice + atr * slMultiplier * (rrRatio + 2);   // TP3 (1:4)
+      takeProfit = entryPrice + atr * slMultiplier * rrRatio;
+      takeProfit2 = entryPrice + atr * slMultiplier * (rrRatio + 1);
+      takeProfit3 = entryPrice + atr * slMultiplier * (rrRatio + 2);
     } else {
       stopLoss = entryPrice + atr * slMultiplier;
       takeProfit = entryPrice - atr * slMultiplier * rrRatio;
@@ -49,15 +57,14 @@ class RiskManager {
 
     const slDistance = Math.abs(entryPrice - stopLoss);
     const tpDistance = Math.abs(takeProfit - entryPrice);
+    const slPips = slDistance / PIP_SIZE;
 
-    // Pip value for XAUUSD (1 pip = $0.01, 1 lot = 100 oz)
-    const pipValue = 0.01;
-    const lotPipValue = 1; // $1 per pip per 1 lot for XAUUSD
-
-    // Position size based on risk
-    // risk$ = account_balance * risk_percent / 100
+    // ── Position Sizing ──
+    // risk$ = balance * risk% / 100
     // lots = risk$ / (sl_pips * pip_value_per_lot)
-    const slPips = slDistance / pipValue;
+    const riskAmount = accountBalance * (riskPercent / 100);
+    const rawLots = slPips > 0 ? riskAmount / (slPips * LOT_PIP_VALUE) : 0;
+    const lots = Math.max(MIN_LOT, Math.min(MAX_LOT, Math.floor(rawLots * 100) / 100)); // round down to 0.01
 
     const result = {
       direction,
@@ -72,28 +79,39 @@ class RiskManager {
       atr: this._round(atr),
       slPips: Math.round(slPips),
       riskPercent,
+
+      // Position sizing
+      accountBalance,
+      riskAmount: this._round(riskAmount),
+      lots,
+      potentialLoss: this._round(lots * slPips * LOT_PIP_VALUE),
+      potentialProfit: this._round(lots * (tpDistance / PIP_SIZE) * LOT_PIP_VALUE),
+
+      // Spread info
+      spread,
+      spreadCost: this._round(lots * (spread / PIP_SIZE) * LOT_PIP_VALUE),
     };
 
-    // Trailing stop info
+    // Trailing stop
     if (config.risk.trailingStopEnabled) {
       result.trailingStop = {
         enabled: true,
-        activationDistance: this._round(tpDistance * 0.5), // Activate at 50% of TP
-        trailDistance: this._round(slDistance * 0.5),       // Trail at 50% of SL
+        activationDistance: this._round(tpDistance * 0.5),
+        trailDistance: this._round(slDistance * 0.5),
       };
     }
 
-    // Break-even info
+    // Break-even
     if (config.risk.breakEvenEnabled) {
       result.breakEven = {
         enabled: true,
-        activationDistance: this._round(slDistance * 1.5), // Move SL to BE after 1.5x SL distance
+        activationDistance: this._round(slDistance * 1.5),
       };
     }
 
     logger.info(
       `[Risk] ${direction} @ ${result.entryPrice} | SL: ${result.stopLoss} | ` +
-        `TP1: ${result.takeProfit} | TP2: ${result.takeProfit2} | ` +
+        `TP1: ${result.takeProfit} | Lots: ${lots} | Risk: $${result.riskAmount} | ` +
         `RR: ${result.riskRewardRatio} | ATR: ${result.atr}`
     );
 
@@ -106,7 +124,7 @@ class RiskManager {
   validate(riskParams) {
     if (!riskParams) return false;
 
-    const { entryPrice, stopLoss, takeProfit, direction } = riskParams;
+    const { entryPrice, stopLoss, takeProfit, direction, lots } = riskParams;
 
     // SL must be on correct side
     if (direction === 'BUY' && stopLoss >= entryPrice) return false;
@@ -120,6 +138,12 @@ class RiskManager {
     const slPercent = (riskParams.slDistance / entryPrice) * 100;
     if (slPercent > 2) {
       logger.warn(`[Risk] SL too wide: ${slPercent.toFixed(2)}% of price`);
+      return false;
+    }
+
+    // Lot size sanity check
+    if (lots < MIN_LOT) {
+      logger.warn(`[Risk] Lot size too small: ${lots}`);
       return false;
     }
 

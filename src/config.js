@@ -101,10 +101,12 @@ const config = {
 
   // Risk Management
   risk: {
+    accountBalance: parseFloat(process.env.ACCOUNT_BALANCE) || 10000,
     atrMultiplierSL: 1.5,
     atrMultiplierTP: 3.0,
     trailingStopEnabled: true,
     breakEvenEnabled: true,
+    spreadPoints: parseFloat(process.env.SPREAD_POINTS) || 0.30, // typical XAUUSD spread
   },
 
   // Cron - separate schedules per timeframe

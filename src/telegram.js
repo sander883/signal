@@ -50,7 +50,9 @@ ${signal.confluence ? `🎯 *Strategies Agreeing:* ${signal.confluence}` : ''}
 
 📏 *SL Distance:* ${riskParams.slDistance} (${riskParams.slPips} pips)
 📐 *ATR:* ${riskParams.atr}
-⚠️ *Risk:* ${riskParams.riskPercent}%
+⚠️ *Risk:* ${riskParams.riskPercent}% ($${riskParams.riskAmount})
+📦 *Lot Size:* ${riskParams.lots}
+💵 *Potential Profit:* $${riskParams.potentialProfit} | Loss: $${riskParams.potentialLoss}
 
 ${riskParams.trailingStop?.enabled ? '🔄 *Trailing Stop:* Active' : ''}
 ${riskParams.breakEven?.enabled ? '⚖️ *Break Even:* Active' : ''}
