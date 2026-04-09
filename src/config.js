@@ -79,7 +79,7 @@ const config = {
     provider: process.env.AI_PROVIDER || 'minimax',
     minimax: {
       apiKey: process.env.MINIMAX_API_KEY || '',
-      groupId: process.env.MINIMAX_GROUP_ID || '',
+      // groupId not needed for v2 API — only API key required
       model: process.env.MINIMAX_MODEL || 'abab6.5s-chat',
       baseUrl: process.env.MINIMAX_BASE_URL || 'https://api.minimax.chat/v1',
     },
