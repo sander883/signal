@@ -11,6 +11,40 @@ class PaperTrader {
     this.nextId = 1;
   }
 
+  /**
+   * Restore open positions, closed history, and balance from persisted state.
+   */
+  restore(state) {
+    if (!state) return;
+    if (typeof state.paperBalance === 'number') this.balance = state.paperBalance;
+    if (Array.isArray(state.paperPositions)) {
+      this.positions = state.paperPositions;
+      this.nextId = Math.max(...this.positions.map((p) => p.id), 0) + 1;
+    }
+    if (Array.isArray(state.paperClosed)) {
+      this.closed = state.paperClosed;
+      this.nextId = Math.max(
+        this.nextId,
+        ...this.closed.map((p) => p.id || 0),
+      ) + 1;
+    }
+    this.equityCurve = [this.balance];
+    logger.info(
+      `[Paper] Restored: balance=${this.balance.toFixed(2)} open=${this.positions.length} closed=${this.closed.length}`
+    );
+  }
+
+  /**
+   * Snapshot current state for persistence.
+   */
+  snapshot() {
+    return {
+      paperBalance: this.balance,
+      paperPositions: this.positions,
+      paperClosed: this.closed.slice(-100),
+    };
+  }
+
   open(signal, riskParams, timeframe) {
     if (!this.enabled) return { opened: false, reason: 'Paper trading disabled' };
     if (this.positions.length >= config.paperTrading.maxOpenPositions) {

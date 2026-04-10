@@ -29,6 +29,14 @@ class AIAgent {
     this.dedupeCache = {};    // { "BUY_15min": timestamp }
     this.totalCalls = 0;
     this.totalSkipped = 0;
+
+    // Decision-source tracking for audit/SLO
+    // decisionSources: { model: N, auto_approve: N, bypass: N, rate_limited: N,
+    //                    dedupe: N, error: N, strict_reject: N }
+    this.decisionSources = {};
+    this.bypassCount = 0;   // bypassed (not model-decided) in current window
+    this.decisionCount = 0; // total decisions in current window
+    this.lastBypassAlert = 0;
   }
 
   init() {
@@ -57,8 +65,10 @@ class AIAgent {
    * - confidence 50-84%  → ASK AI (the uncertain zone)
    */
   async validateSignal(signal, riskParams, marketContext) {
+    this.decisionCount++;
+
     if (!this.enabled) {
-      return this._bypassResult(signal, 'AI disabled');
+      return this._bypassResult(signal, 'AI disabled', 'bypass');
     }
 
     const { smartGateMin, smartGateMax } = config.ai;
@@ -66,6 +76,7 @@ class AIAgent {
     // ── CHECK 1: Smart Gate — skip AI for high-confidence signals ──
     if (signal.confidence >= smartGateMax + 1) {
       this.totalSkipped++;
+      this._trackDecision('auto_approve');
       logger.info(`[AI] AUTO-APPROVE: confidence ${signal.confidence}% >= ${smartGateMax + 1}% threshold`);
       return {
         approved: true,
@@ -73,6 +84,7 @@ class AIAgent {
         sentiment: 'neutral',
         reason: `Auto-approved (high confidence ${signal.confidence}%)`,
         adjustedSignal: null,
+        decisionSource: 'auto_approve',
       };
     }
 
@@ -83,7 +95,7 @@ class AIAgent {
       this.totalSkipped++;
       const minAgo = Math.round((Date.now() - lastCall) / 60000);
       logger.info(`[AI] DEDUPE SKIP: same ${dedupeKey} was checked ${minAgo}min ago`);
-      return this._bypassResult(signal, `Dedupe: same signal checked ${minAgo}min ago`);
+      return this._bypassResult(signal, `Dedupe: same signal checked ${minAgo}min ago`, 'dedupe');
     }
 
     // ── CHECK 3: Rate limiter ──
@@ -93,7 +105,7 @@ class AIAgent {
       if (this.callLog.length >= config.ai.maxCallsPerHour) {
         this.totalSkipped++;
         logger.warn(`[AI] RATE LIMITED: ${this.callLog.length}/${config.ai.maxCallsPerHour} calls this hour`);
-        return this._bypassResult(signal, 'Rate limited');
+        return this._fallbackResult(signal, 'Rate limited', 'rate_limited');
       }
     }
 
@@ -102,21 +114,103 @@ class AIAgent {
       const prompt = this._buildCompactPrompt(signal, riskParams, marketContext);
       const response = await this._chat(prompt);
       const result = this._parseValidationResponse(response, signal);
+      result.decisionSource = 'model';
 
       // Track
       this.callLog.push(Date.now());
       this.dedupeCache[dedupeKey] = Date.now();
       this.totalCalls++;
+      this._trackDecision('model');
 
       logger.info(
         `[AI] ${result.approved ? 'APPROVED' : 'REJECTED'} | conf: ${result.confidence}% | ` +
-          `${result.reason} | calls today: ${this.totalCalls} | skipped: ${this.totalSkipped}`
+          `${result.reason} | source: model | calls today: ${this.totalCalls} | skipped: ${this.totalSkipped}`
       );
 
       return result;
     } catch (err) {
       logger.error(`[AI] Error: ${err.message}`);
-      return this._bypassResult(signal, `Error: ${err.message}`);
+      return this._fallbackResult(signal, `Error: ${err.message}`, 'error');
+    }
+  }
+
+  /**
+   * Tiered fallback behavior when AI cannot decide (error/rate-limit).
+   *
+   * STRICT mode (default):
+   * - confidence 50-65 → AUTO-REJECT (too uncertain to trust fallback)
+   * - confidence 66-84 → APPROVE with penalty
+   *
+   * NORMAL mode:
+   * - confidence 50-84 → APPROVE with penalty
+   *
+   * Penalty reduces confidence to discourage over-reliance on fallback.
+   */
+  _fallbackResult(signal, reason, source) {
+    const { smartGateMin, smartGateMax, fallbackMode, fallbackPenalty, fallbackAllow } = config.ai;
+    this._trackDecision(source);
+    this.bypassCount++;
+    this._maybeCheckBypassRate();
+
+    // fallbackAllow=false → always reject
+    if (!fallbackAllow) {
+      return {
+        approved: false,
+        confidence: signal.confidence,
+        sentiment: 'neutral',
+        reason: `${reason} (fallback_allow=false)`,
+        adjustedSignal: null,
+        decisionSource: source,
+      };
+    }
+
+    // Strict mode: reject the low-confidence grey zone
+    const strictRejectCutoff = Math.floor((smartGateMin + smartGateMax) / 2); // default: 67
+    if (fallbackMode === 'strict' && signal.confidence < strictRejectCutoff) {
+      this._trackDecision('strict_reject');
+      logger.warn(
+        `[AI] STRICT REJECT: conf ${signal.confidence}% < ${strictRejectCutoff}% cutoff (source: ${source})`
+      );
+      return {
+        approved: false,
+        confidence: signal.confidence,
+        sentiment: 'neutral',
+        reason: `Strict fallback reject: ${reason}`,
+        adjustedSignal: null,
+        decisionSource: 'strict_reject',
+      };
+    }
+
+    // Normal mode or strict-but-above-cutoff: approve with penalty
+    const penalized = Math.max(signal.confidence - fallbackPenalty, 25);
+    logger.info(
+      `[AI] FALLBACK PASS: ${signal.confidence}% → ${penalized}% (-${fallbackPenalty}, source: ${source})`
+    );
+    return {
+      approved: true,
+      confidence: penalized,
+      sentiment: 'neutral',
+      reason: `${reason} — fallback pass (-${fallbackPenalty}%)`,
+      adjustedSignal: null,
+      decisionSource: source,
+    };
+  }
+
+  _trackDecision(source) {
+    if (!(source in this.decisionSources)) this.decisionSources[source] = 0;
+    this.decisionSources[source] += 1;
+  }
+
+  _maybeCheckBypassRate() {
+    const threshold = config.ai.bypassAlertThreshold;
+    if (!threshold || this.decisionCount < 10) return;
+
+    const pct = Math.round((this.bypassCount / this.decisionCount) * 100);
+    if (pct > threshold && Date.now() - this.lastBypassAlert > 3600000) {
+      logger.warn(
+        `[AI] BYPASS RATE HIGH: ${pct}% (${this.bypassCount}/${this.decisionCount}) exceeds ${threshold}% threshold`
+      );
+      this.lastBypassAlert = Date.now();
     }
   }
 
@@ -306,13 +400,15 @@ JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT
     }
   }
 
-  _bypassResult(signal, reason) {
+  _bypassResult(signal, reason, source = 'bypass') {
+    this._trackDecision(source);
     return {
       approved: config.ai.fallbackAllow,
       confidence: signal.confidence,
       sentiment: 'neutral',
       reason,
       adjustedSignal: null,
+      decisionSource: source,
     };
   }
 
@@ -320,6 +416,9 @@ JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT
    * Get usage stats for logging/debugging.
    */
   getStats() {
+    const bypassRate = this.decisionCount > 0
+      ? Math.round((this.bypassCount / this.decisionCount) * 100)
+      : 0;
     return {
       totalCalls: this.totalCalls,
       totalSkipped: this.totalSkipped,
@@ -327,6 +426,8 @@ JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT
         ? Math.round((this.totalSkipped / (this.totalCalls + this.totalSkipped)) * 100)
         : 0,
       callsThisHour: this.callLog.filter((t) => t > Date.now() - 3600000).length,
+      bypassRate,
+      decisionSources: { ...this.decisionSources },
     };
   }
 }

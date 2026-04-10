@@ -89,6 +89,12 @@ const config = {
     minConfidence: parseInt(process.env.AI_MIN_CONFIDENCE) || 40,
     // When AI is unavailable, should signals still pass?
     fallbackAllow: process.env.AI_FALLBACK_ALLOW !== 'false',
+    // Fallback mode: 'strict' (reject 50-65 on AI fail) or 'normal' (pass with penalty)
+    fallbackMode: process.env.AI_FALLBACK_MODE || 'strict',
+    // Confidence penalty applied to bypassed signals in normal mode (0-30)
+    fallbackPenalty: parseInt(process.env.AI_FALLBACK_PENALTY) || 10,
+    // Alert when bypass rate exceeds this % (0 = disabled)
+    bypassAlertThreshold: parseInt(process.env.AI_BYPASS_ALERT_PCT) || 20,
 
     // ── Token-saving settings ──
     // Only call AI when confidence is in this "uncertain" range.

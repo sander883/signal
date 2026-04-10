@@ -25,9 +25,25 @@ class NewsFilter {
   constructor() {
     this.events = [];
     this.lastFetch = 0;
+    this.lastSuccessfulFetch = 0; // last time we got REAL (non-fallback) data
+    this.lastSourceOk = false;
     this.fetchInterval = 30 * 60 * 1000; // Refresh every 30 minutes
     this.isBlocked = false;
     this.blockReason = '';
+  }
+
+  /**
+   * Freshness status based on last successful (real) fetch.
+   * - fresh     : < 30 min
+   * - degraded  : 30-120 min
+   * - stale     : > 120 min
+   */
+  getFreshnessStatus() {
+    if (!this.lastSuccessfulFetch) return 'unknown';
+    const ageMin = (Date.now() - this.lastSuccessfulFetch) / 60000;
+    if (ageMin < 30) return 'fresh';
+    if (ageMin < 120) return 'degraded';
+    return 'stale';
   }
 
   /**
@@ -45,8 +61,22 @@ class NewsFilter {
     }
 
     const now = new Date();
-    const bufferBefore = config.newsFilter.bufferBeforeMin * 60 * 1000;
-    const bufferAfter = config.newsFilter.bufferAfterMin * 60 * 1000;
+    const freshness = this.getFreshnessStatus();
+
+    // Widen buffers automatically when source is degraded/stale
+    // (we're less certain about exact event times, be more conservative)
+    let bufferMultiplier = 1;
+    if (freshness === 'degraded') bufferMultiplier = 1.5;
+    else if (freshness === 'stale' || freshness === 'unknown') bufferMultiplier = 2;
+
+    const bufferBefore = config.newsFilter.bufferBeforeMin * 60 * 1000 * bufferMultiplier;
+    const bufferAfter = config.newsFilter.bufferAfterMin * 60 * 1000 * bufferMultiplier;
+
+    if (bufferMultiplier > 1) {
+      logger.warn(
+        `[News] Freshness: ${freshness} → buffers widened ${bufferMultiplier}x`
+      );
+    }
 
     let blocked = false;
     let reason = '';
@@ -104,9 +134,11 @@ class NewsFilter {
       // Try primary source: Forex Factory style via noebs/FXCalendar API
       const events = await this._fetchFromForexFactory();
       if (events.length > 0) {
-        this.events = events;
+        this.events = this._sortAndNormalize(events);
         this.lastFetch = Date.now();
-        logger.info(`Loaded ${events.length} high-impact events`);
+        this.lastSuccessfulFetch = Date.now();
+        this.lastSourceOk = true;
+        logger.info(`Loaded ${events.length} high-impact events (source: ForexFactory)`);
         return;
       }
     } catch (err) {
@@ -116,9 +148,10 @@ class NewsFilter {
     try {
       // Fallback: construct events from known schedule
       const events = this._getKnownScheduledEvents();
-      this.events = events;
+      this.events = this._sortAndNormalize(events);
       this.lastFetch = Date.now();
-      logger.info(`Using ${events.length} known scheduled events as fallback`);
+      this.lastSourceOk = false; // fallback data, don't mark as successful source
+      logger.warn(`Using ${events.length} known scheduled events (fallback, source unreliable)`);
     } catch (err) {
       logger.error(`All news sources failed: ${err.message}`);
       // SAFETY: If we can't fetch news, block trading as precaution
@@ -275,6 +308,21 @@ class NewsFilter {
   _isWithinDays(eventDate, days) {
     const diff = Math.abs(Date.now() - eventDate.getTime());
     return diff < days * 24 * 60 * 60 * 1000;
+  }
+
+  /**
+   * Sort events ascending by time and normalize timestamps to UTC ISO strings.
+   * Filters out invalid/unparseable timestamps.
+   */
+  _sortAndNormalize(events) {
+    return events
+      .map((e) => {
+        const t = new Date(e.time);
+        if (Number.isNaN(t.getTime())) return null;
+        return { ...e, time: t.toISOString() };
+      })
+      .filter(Boolean)
+      .sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
   }
 
   /**

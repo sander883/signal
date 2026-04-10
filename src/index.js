@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const config = require('./config');
+const { validateOrThrow } = require('./configValidator');
 const logger = require('./logger');
 const marketData = require('./data');
 const indicators = require('./indicators');
@@ -12,6 +13,8 @@ const aiAgent = require('./aiAgent');
 const telegram = require('./telegram');
 const metrics = require('./metrics');
 const paperTrader = require('./paperTrader');
+const state = require('./state');
+const healthServer = require('./healthServer');
 
 // Performance tracking
 const stats = {
@@ -28,8 +31,24 @@ const stats = {
 };
 
 // Duplicate signal protection: tracks last signal per timeframe
-const lastSignalSent = {}; // { "15min": { direction: "BUY", time: Date.now(), price: 2345 } }
+// This is restored from persistent state at startup
+let lastSignalSent = {}; // { "15min": { direction: "BUY", time: Date.now(), price: 2345 } }
 const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown per timeframe
+
+/**
+ * Persist mutable runtime state to disk (best-effort, async not needed).
+ */
+function persistState() {
+  state.set('lastSignalSent', lastSignalSent);
+  state.set('metricCounters', metrics.counters);
+  if (paperTrader.enabled) {
+    const snap = paperTrader.snapshot();
+    state.set('paperBalance', snap.paperBalance);
+    state.set('paperPositions', snap.paperPositions);
+    state.set('paperClosed', snap.paperClosed);
+  }
+  state.save();
+}
 
 /**
  * Run analysis for a SINGLE timeframe.
@@ -77,9 +96,11 @@ async function runAnalysisForTimeframe(timeframe) {
       return;
     }
 
-    // Update open paper positions using latest candle for this timeframe
+    // Update open paper positions using latest candle for this timeframe.
+    // Persist immediately when any position closes so balance/history survive restarts.
     if (paperTrader.enabled) {
-      paperTrader.updateWithCandle(timeframe, candles[candles.length - 1]);
+      const closedNow = paperTrader.updateWithCandle(timeframe, candles[candles.length - 1]);
+      if (closedNow && closedNow.length > 0) persistState();
     }
 
     // Fetch higher timeframe for trend alignment
@@ -187,8 +208,8 @@ async function runAnalysisForTimeframe(timeframe) {
       indData.atr
     );
 
-    if (!riskParams || !riskManager.validate(riskParams)) {
-      logger.warn(`[${timeframe}] Risk validation failed, signal discarded`);
+    if (!riskParams || !riskManager.validate(riskParams, { atrValues: indData.atr })) {
+      logger.warn(`[${timeframe}] Risk/quality validation failed, signal discarded`);
       stats.errors++;
       return;
     }
@@ -229,7 +250,7 @@ async function runAnalysisForTimeframe(timeframe) {
       logger.info(`[${timeframe}] [AI] Adjusted levels applied`);
 
       // Re-validate after AI adjustments
-      if (!riskManager.validate(riskParams)) {
+      if (!riskManager.validate(riskParams, { atrValues: indData.atr })) {
         logger.warn(`[${timeframe}] AI-adjusted risk params invalid, discarding`);
         stats.errors++;
         return;
@@ -271,6 +292,9 @@ async function runAnalysisForTimeframe(timeframe) {
       price: currentPrice,
     };
 
+    // Persist state after each successful signal so a restart keeps cooldowns
+    persistState();
+
     // Update stats
     stats.totalSignals++;
     if (bestSignal.signal === 'BUY') stats.buySignals++;
@@ -291,7 +315,9 @@ async function runAnalysisForTimeframe(timeframe) {
     await telegram.sendMessage(`⚠️ Bot error [${timeframe}]: ${err.message}`).catch(() => {});
   }
 
-  logger.info(`[${timeframe}] Cycle completed in ${Date.now() - cycleStart}ms`);
+  const cycleDuration = Date.now() - cycleStart;
+  healthServer.markCycle(cycleDuration);
+  logger.info(`[${timeframe}] Cycle completed in ${cycleDuration}ms`);
 
   const hbEveryMs = config.observability.heartbeatMinutes * 60 * 1000;
   if (Date.now() - metrics.lastHeartbeat >= hbEveryMs) {
@@ -369,6 +395,19 @@ async function start() {
   ╚══════════════════════════════════════════╝
   `);
 
+  // ── Validate config BEFORE touching any external services ──
+  validateOrThrow();
+  logger.info('[Config] Validated — all required settings present');
+
+  // ── Restore persistent state (cooldowns, metrics, paper positions) ──
+  state.load();
+  lastSignalSent = state.get('lastSignalSent') || {};
+  metrics.restore(state.get('metricCounters'));
+  if (paperTrader.enabled) paperTrader.restore(state.data);
+  logger.info(
+    `[State] Cooldowns restored for timeframes: ${Object.keys(lastSignalSent).join(', ') || 'none'}`
+  );
+
   // Initialize Telegram
   telegram.init();
 
@@ -379,6 +418,9 @@ async function start() {
   logger.info('Loading economic calendar...');
   await newsFilter.fetchEvents();
   logger.info(newsFilter.getSummary());
+
+  // Start HTTP health/metrics endpoint (opt-in via HEALTH_SERVER_ENABLED)
+  healthServer.start();
 
   // Send startup notification
   await telegram.sendStartup();
@@ -405,11 +447,20 @@ async function start() {
   logger.info('Bot is running. Waiting for next scheduled cycle...');
 }
 
-// Handle graceful shutdown
-process.on('SIGINT', () => {
-  logger.info('Shutting down gracefully...');
+// Handle graceful shutdown — persist state so cooldowns/metrics/paper survive restarts
+function shutdown(signal) {
+  logger.info(`Received ${signal}, persisting state and shutting down...`);
+  try {
+    persistState();
+    logger.info('[State] Persisted on shutdown');
+  } catch (err) {
+    logger.error(`[State] Shutdown persist failed: ${err.message}`);
+  }
   process.exit(0);
-});
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 process.on('uncaughtException', (err) => {
   logger.error(`Uncaught exception: ${err.message}`, { stack: err.stack });

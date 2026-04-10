@@ -120,11 +120,13 @@ class RiskManager {
 
   /**
    * Validate that risk parameters are reasonable.
+   * @param {Object} riskParams
+   * @param {Object} [context] - optional { atrValues } for percentile gate
    */
-  validate(riskParams) {
+  validate(riskParams, context = {}) {
     if (!riskParams) return false;
 
-    const { entryPrice, stopLoss, takeProfit, direction, lots } = riskParams;
+    const { entryPrice, stopLoss, takeProfit, direction, lots, slDistance, spread } = riskParams;
 
     // SL must be on correct side
     if (direction === 'BUY' && stopLoss >= entryPrice) return false;
@@ -135,7 +137,7 @@ class RiskManager {
     if (direction === 'SELL' && takeProfit >= entryPrice) return false;
 
     // SL distance shouldn't exceed 2% of price
-    const slPercent = (riskParams.slDistance / entryPrice) * 100;
+    const slPercent = (slDistance / entryPrice) * 100;
     if (slPercent > 2) {
       logger.warn(`[Risk] SL too wide: ${slPercent.toFixed(2)}% of price`);
       return false;
@@ -145,6 +147,33 @@ class RiskManager {
     if (lots < MIN_LOT) {
       logger.warn(`[Risk] Lot size too small: ${lots}`);
       return false;
+    }
+
+    // ── QUALITY GATE: spread vs SL distance ──
+    // Spread eating >15% of SL distance = not worth the trade
+    if (spread != null && slDistance > 0) {
+      const spreadRatio = spread / slDistance;
+      if (spreadRatio > 0.15) {
+        logger.warn(
+          `[Risk] Spread too wide for SL: ${(spreadRatio * 100).toFixed(1)}% of SL distance`
+        );
+        return false;
+      }
+    }
+
+    // ── QUALITY GATE: ATR percentile (avoid noise zone) ──
+    // If ATR is in the bottom 10% of recent history, volatility is too low
+    if (context.atrValues && Array.isArray(context.atrValues) && context.atrValues.length >= 30) {
+      const recent = context.atrValues.slice(-60);
+      const currentAtr = recent[recent.length - 1];
+      const sorted = [...recent].sort((a, b) => a - b);
+      const p10 = sorted[Math.floor(sorted.length * 0.1)];
+      if (currentAtr < p10) {
+        logger.warn(
+          `[Risk] ATR too low (${currentAtr.toFixed(2)} < p10 ${p10.toFixed(2)}) — noise zone, skip`
+        );
+        return false;
+      }
     }
 
     return true;

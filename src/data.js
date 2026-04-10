@@ -2,6 +2,19 @@ const axios = require('axios');
 const config = require('./config');
 const logger = require('./logger');
 
+// Max allowed stale age per timeframe (multiplier × interval).
+// If cached data is older than this, treat it as unusable.
+const TF_MS = {
+  '1min': 60_000,
+  '5min': 5 * 60_000,
+  '15min': 15 * 60_000,
+  '30min': 30 * 60_000,
+  '1h': 60 * 60_000,
+  '4h': 4 * 60 * 60_000,
+  '1day': 24 * 60 * 60_000,
+};
+const STALE_MULTIPLIER = 3; // Fresh = < 3 × interval
+
 class MarketData {
   constructor() {
     this.cache = new Map();
@@ -11,6 +24,26 @@ class MarketData {
       alphavantage: { failures: 0, blockedUntil: 0 },
     };
     this.breakerCooldownMs = 5 * 60 * 1000; // 5 minutes
+    this.lastSuccessfulFetch = {}; // per timeframe: { ts, provider }
+  }
+
+  /**
+   * Max allowed stale age for a given timeframe (in ms).
+   */
+  getMaxStaleMs(timeframe) {
+    const intervalMs = TF_MS[timeframe] || TF_MS['15min'];
+    return intervalMs * STALE_MULTIPLIER;
+  }
+
+  /**
+   * Check if data for a timeframe is currently fresh enough.
+   * Returns { fresh, ageMs, maxAgeMs }
+   */
+  getFreshnessStatus(timeframe) {
+    const last = this.lastSuccessfulFetch[timeframe];
+    if (!last) return { fresh: false, ageMs: Infinity, maxAgeMs: this.getMaxStaleMs(timeframe) };
+    const ageMs = Date.now() - last.ts;
+    return { fresh: ageMs < this.getMaxStaleMs(timeframe), ageMs, maxAgeMs: this.getMaxStaleMs(timeframe) };
   }
 
   /**
@@ -33,6 +66,7 @@ class MarketData {
         : ['alphavantage', 'twelvedata'];
 
       let candles;
+      let usedProvider;
       let lastErr;
       for (const provider of order) {
         if (this._isProviderBlocked(provider)) continue;
@@ -41,6 +75,7 @@ class MarketData {
             ? await this._fetchTwelveData(timeframe, outputSize)
             : await this._fetchAlphaVantage(timeframe, outputSize);
           this._recordProviderSuccess(provider);
+          usedProvider = provider;
           break;
         } catch (err) {
           lastErr = err;
@@ -54,14 +89,22 @@ class MarketData {
       }
 
       this.cache.set(cacheKey, { data: candles, ts: Date.now() });
-      logger.info(`Fetched ${candles.length} candles for ${config.symbol} [${timeframe}]`);
+      this.lastSuccessfulFetch[timeframe] = { ts: Date.now(), provider: usedProvider };
+      logger.info(`Fetched ${candles.length} candles for ${config.symbol} [${timeframe}] from ${usedProvider}`);
       return candles;
     } catch (err) {
       logger.error(`Failed to fetch market data: ${err.message}`);
-      // Return cached data if available, even if stale
+      // Return cached data if available AND within max staleness
       if (cached) {
-        logger.warn('Returning stale cached data');
-        return cached.data;
+        const maxStaleMs = this.getMaxStaleMs(timeframe);
+        const ageMs = Date.now() - cached.ts;
+        if (ageMs <= maxStaleMs) {
+          logger.warn(`Returning cached data (age: ${Math.round(ageMs / 1000)}s, max: ${Math.round(maxStaleMs / 1000)}s)`);
+          return cached.data;
+        }
+        logger.error(
+          `Cached data too stale (${Math.round(ageMs / 1000)}s > ${Math.round(maxStaleMs / 1000)}s), refusing`
+        );
       }
       throw err;
     }
@@ -102,13 +145,25 @@ class MarketData {
       timeout: 15000,
     });
 
-    if (resp.data.status === 'error') {
-      throw new Error(`TwelveData API error: ${resp.data.message}`);
+    const d = resp.data;
+
+    // Error payload
+    if (d.status === 'error') {
+      throw new Error(`TwelveData error: ${d.message}`);
     }
 
-    const values = resp.data.values || [];
+    // Rate limit (code 429 in response body, or text clues)
+    if (d.code === 429 || /rate limit|too many requests|api credits/i.test(d.message || '')) {
+      throw new Error(`TwelveData rate-limited: ${d.message || 'API credit exhausted'}`);
+    }
+
+    // Missing values
+    if (!Array.isArray(d.values) || d.values.length === 0) {
+      throw new Error(`TwelveData: empty values (message: ${d.message || 'none'})`);
+    }
+
     // TwelveData returns newest first; reverse so oldest is index 0
-    return values
+    const candles = d.values
       .map((v) => ({
         time: v.datetime,
         open: parseFloat(v.open),
@@ -117,7 +172,13 @@ class MarketData {
         close: parseFloat(v.close),
         volume: parseFloat(v.volume) || 0,
       }))
+      .filter((c) => Number.isFinite(c.close) && Number.isFinite(c.high) && Number.isFinite(c.low))
       .reverse();
+
+    if (candles.length === 0) {
+      throw new Error('TwelveData: no valid candles after parse');
+    }
+    return candles;
   }
 
   async _fetchAlphaVantage(timeframe, outputSize) {
@@ -155,8 +216,24 @@ class MarketData {
       timeout: 15000,
     });
 
+    const d = resp.data;
+
+    // AV returns different payload shapes for errors:
+    // - {"Note": "Thank you for using Alpha Vantage! Our standard API rate limit is..."}
+    // - {"Information": "The **demo** API key is for demo purposes only..."}
+    // - {"Error Message": "Invalid API call..."}
+    if (d.Note) {
+      throw new Error(`AlphaVantage rate-limited: ${String(d.Note).slice(0, 120)}`);
+    }
+    if (d.Information) {
+      throw new Error(`AlphaVantage info/limit: ${String(d.Information).slice(0, 120)}`);
+    }
+    if (d['Error Message']) {
+      throw new Error(`AlphaVantage error: ${d['Error Message']}`);
+    }
+
     // AV uses dynamic key names
-    const seriesKey = Object.keys(resp.data).find((k) => k.includes('Time Series'));
+    const seriesKey = Object.keys(d).find((k) => k.includes('Time Series'));
     if (!seriesKey) {
       throw new Error('AlphaVantage: No time series data returned');
     }

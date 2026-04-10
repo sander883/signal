@@ -11,8 +11,21 @@ class Metrics {
       aiRejected: 0,
       errors: 0,
       dataFallbacks: 0,
+      staleDataAlerts: 0,
     };
     this.lastHeartbeat = Date.now();
+  }
+
+  /**
+   * Restore counters from persisted state.
+   */
+  restore(saved) {
+    if (saved && typeof saved === 'object') {
+      for (const [k, v] of Object.entries(saved)) {
+        if (typeof v === 'number') this.counters[k] = v;
+      }
+      logger.info(`[Metrics] Restored ${Object.keys(saved).length} counters from state`);
+    }
   }
 
   inc(key, amount = 1) {
