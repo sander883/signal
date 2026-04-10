@@ -36,9 +36,9 @@ class TelegramService {
     const message = `
 ${emoji} *XAUUSD ${signal.signal} SIGNAL* ${arrow}
 
-📊 *Strategy:* ${signal.strategy}
-${signal.allStrategies ? `🔗 *Confluence:* ${signal.allStrategies}` : ''}
-⏱ *Timeframe:* ${timeframe}
+📊 *Strategy:* ${this._md(signal.strategy)}
+${signal.allStrategies ? `🔗 *Confluence:* ${this._md(signal.allStrategies)}` : ''}
+⏱ *Timeframe:* ${this._md(timeframe)}
 📈 *Confidence:* ${signal.confidence}%
 ${signal.confluence ? `🎯 *Strategies Agreeing:* ${signal.confluence}` : ''}
 
@@ -56,7 +56,7 @@ ${signal.confluence ? `🎯 *Strategies Agreeing:* ${signal.confluence}` : ''}
 
 ${riskParams.trailingStop?.enabled ? '🔄 *Trailing Stop:* Active' : ''}
 ${riskParams.breakEven?.enabled ? '⚖️ *Break Even:* Active' : ''}
-${signal.aiConfidence ? `\n🤖 *AI Validation:* ${signal.aiConfidence}% (${signal.aiSentiment})\n💬 ${signal.aiReason}` : ''}
+${signal.aiConfidence ? `\n🤖 *AI Validation:* ${signal.aiConfidence}% (${this._md(signal.aiSentiment)})\n💬 ${this._md(signal.aiReason)}` : ''}
 
 🕐 ${new Date().toUTCString()}
     `.trim();
@@ -72,7 +72,7 @@ ${signal.aiConfidence ? `\n🤖 *AI Validation:* ${signal.aiConfidence}% (${sign
 ⚠️ *TRADING PAUSED - NEWS FILTER*
 
 🚫 Signal generation blocked
-📰 ${reason}
+📰 ${this._md(reason)}
 
 ⏳ Trading will resume after the news buffer period ends.
 
@@ -89,7 +89,7 @@ ${signal.aiConfidence ? `\n🤖 *AI Validation:* ${signal.aiConfidence}% (${sign
     const message = `
 🕐 *SESSION FILTER ACTIVE*
 
-${reason}
+${this._md(reason)}
 
 Trading will resume during London or New York session.
     `.trim();
@@ -105,12 +105,12 @@ Trading will resume during London or New York session.
 🤖 *AI SIGNAL REVIEW — REJECTED*
 
 ❌ ${signal.signal} signal rejected by AI
-📊 Strategy: ${signal.strategy}
-⏱ Timeframe: ${timeframe}
+📊 Strategy: ${this._md(signal.strategy)}
+⏱ Timeframe: ${this._md(timeframe)}
 📈 Strategy Confidence: ${signal.confidence}%
 🤖 AI Confidence: ${aiResult.confidence}%
-🧠 Sentiment: ${aiResult.sentiment}
-💬 Reason: ${aiResult.reason}
+🧠 Sentiment: ${this._md(aiResult.sentiment)}
+💬 Reason: ${this._md(aiResult.reason)}
 
 🕐 ${new Date().toUTCString()}
     `.trim();
@@ -173,7 +173,7 @@ Trading will resume during London or New York session.
    * Send a raw text message.
    */
   async sendMessage(text) {
-    await this._send(text);
+    await this._send(this._md(text));
   }
 
   /**
@@ -199,6 +199,11 @@ Trading will resume during London or New York session.
         }
       }
     }
+  }
+
+  _md(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/[*_`[\]]/g, '');
   }
 }
 

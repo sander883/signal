@@ -6,6 +6,11 @@ class MarketData {
   constructor() {
     this.cache = new Map();
     this.cacheTTL = 60 * 1000; // 1 minute cache
+    this.providerState = {
+      twelvedata: { failures: 0, blockedUntil: 0 },
+      alphavantage: { failures: 0, blockedUntil: 0 },
+    };
+    this.breakerCooldownMs = 5 * 60 * 1000; // 5 minutes
   }
 
   /**
@@ -22,11 +27,30 @@ class MarketData {
     }
 
     try {
+      const preferred = config.dataProvider === 'alphavantage' ? 'alphavantage' : 'twelvedata';
+      const order = preferred === 'twelvedata'
+        ? ['twelvedata', 'alphavantage']
+        : ['alphavantage', 'twelvedata'];
+
       let candles;
-      if (config.dataProvider === 'twelvedata') {
-        candles = await this._fetchTwelveData(timeframe, outputSize);
-      } else {
-        candles = await this._fetchAlphaVantage(timeframe, outputSize);
+      let lastErr;
+      for (const provider of order) {
+        if (this._isProviderBlocked(provider)) continue;
+        try {
+          candles = provider === 'twelvedata'
+            ? await this._fetchTwelveData(timeframe, outputSize)
+            : await this._fetchAlphaVantage(timeframe, outputSize);
+          this._recordProviderSuccess(provider);
+          break;
+        } catch (err) {
+          lastErr = err;
+          this._recordProviderFailure(provider);
+          logger.warn(`Provider ${provider} failed: ${err.message}`);
+        }
+      }
+
+      if (!candles) {
+        throw lastErr || new Error('All data providers failed');
       }
 
       this.cache.set(cacheKey, { data: candles, ts: Date.now() });
@@ -40,6 +64,28 @@ class MarketData {
         return cached.data;
       }
       throw err;
+    }
+  }
+
+  _isProviderBlocked(provider) {
+    const state = this.providerState[provider];
+    return state && state.blockedUntil > Date.now();
+  }
+
+  _recordProviderSuccess(provider) {
+    const state = this.providerState[provider];
+    if (!state) return;
+    state.failures = 0;
+    state.blockedUntil = 0;
+  }
+
+  _recordProviderFailure(provider) {
+    const state = this.providerState[provider];
+    if (!state) return;
+    state.failures += 1;
+    if (state.failures >= 3) {
+      state.blockedUntil = Date.now() + this.breakerCooldownMs;
+      logger.warn(`Provider ${provider} circuit breaker open for ${this.breakerCooldownMs / 60000} minutes`);
     }
   }
 
