@@ -130,6 +130,18 @@ const config = {
 
   // Logging
   logLevel: process.env.LOG_LEVEL || 'info',
+
+  // Observability
+  observability: {
+    heartbeatMinutes: parseInt(process.env.HEARTBEAT_MINUTES) || 60,
+  },
+
+  // Paper Trading (virtual execution; no real orders)
+  paperTrading: {
+    enabled: process.env.PAPER_TRADING_ENABLED === 'true',
+    maxOpenPositions: parseInt(process.env.PAPER_MAX_OPEN_POSITIONS) || 3,
+    initialBalance: parseFloat(process.env.PAPER_INITIAL_BALANCE) || 10000,
+  },
 };
 
 module.exports = config;

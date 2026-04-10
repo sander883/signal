@@ -10,6 +10,8 @@ const dxyFilter = require('./filters/dxyFilter');
 const riskManager = require('./risk');
 const aiAgent = require('./aiAgent');
 const telegram = require('./telegram');
+const metrics = require('./metrics');
+const paperTrader = require('./paperTrader');
 
 // Performance tracking
 const stats = {
@@ -37,6 +39,7 @@ const SIGNAL_COOLDOWN_MS = 30 * 60 * 1000; // 30 min cooldown per timeframe
  */
 async function runAnalysisForTimeframe(timeframe) {
   const cycleStart = Date.now();
+  metrics.inc('cycles');
   logger.info('='.repeat(60));
   logger.info(`[${timeframe}] Analysis cycle started | ${new Date().toUTCString()}`);
   logger.info(`Session: ${sessionFilter.getCurrentSession()}`);
@@ -46,6 +49,7 @@ async function runAnalysisForTimeframe(timeframe) {
     const session = sessionFilter.check();
     if (!session.allowed) {
       stats.sessionBlocked++;
+      metrics.inc('sessionBlocked');
       logger.info(`[${timeframe}] [SESSION BLOCK] ${session.reason}`);
       return;
     }
@@ -55,6 +59,7 @@ async function runAnalysisForTimeframe(timeframe) {
     const news = await newsFilter.check();
     if (news.blocked) {
       stats.newsBlocked++;
+      metrics.inc('newsBlocked');
       logger.warn(`[${timeframe}] [NEWS BLOCK ACTIVE] ${news.reason}`);
       await telegram.sendNewsBlock(news.reason);
       return;
@@ -70,6 +75,11 @@ async function runAnalysisForTimeframe(timeframe) {
       logger.error(`[${timeframe}] Insufficient candle data for analysis`);
       stats.errors++;
       return;
+    }
+
+    // Update open paper positions using latest candle for this timeframe
+    if (paperTrader.enabled) {
+      paperTrader.updateWithCandle(timeframe, candles[candles.length - 1]);
     }
 
     // Fetch higher timeframe for trend alignment
@@ -191,6 +201,7 @@ async function runAnalysisForTimeframe(timeframe) {
 
     if (!aiResult.approved) {
       stats.aiRejected = (stats.aiRejected || 0) + 1;
+      metrics.inc('aiRejected');
       logger.warn(
         `[${timeframe}] [AI REJECTED] ${bestSignal.signal} signal — ${aiResult.reason}`
       );
@@ -235,6 +246,14 @@ async function runAnalysisForTimeframe(timeframe) {
 
     // ── STEP 9: Send Alert ──
     await telegram.sendSignal(bestSignal, riskParams, timeframe);
+    metrics.inc('signalsSent');
+
+    if (paperTrader.enabled) {
+      const openResult = paperTrader.open(bestSignal, riskParams, timeframe);
+      if (!openResult.opened) {
+        logger.info(`[Paper] Skip open: ${openResult.reason}`);
+      }
+    }
 
     // Track for duplicate protection
     lastSignalSent[timeframe] = {
@@ -258,11 +277,17 @@ async function runAnalysisForTimeframe(timeframe) {
     );
   } catch (err) {
     stats.errors++;
+    metrics.inc('errors');
     logger.error(`[${timeframe}] Analysis error: ${err.message}`, { stack: err.stack });
     await telegram.sendMessage(`⚠️ Bot error [${timeframe}]: ${err.message}`).catch(() => {});
   }
 
   logger.info(`[${timeframe}] Cycle completed in ${Date.now() - cycleStart}ms`);
+
+  const hbEveryMs = config.observability.heartbeatMinutes * 60 * 1000;
+  if (Date.now() - metrics.lastHeartbeat >= hbEveryMs) {
+    metrics.heartbeat({ paper: paperTrader.stats(), uptimeMin: Math.round((Date.now() - stats.startTime.getTime()) / 60000) });
+  }
 }
 
 /**

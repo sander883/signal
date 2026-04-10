@@ -12,6 +12,7 @@ Advanced Gold (XAU/USD) trading signal generator with mandatory news filtering, 
 - **Strategy Confluence**: Higher confidence when multiple strategies agree
 - **Telegram Alerts**: Real-time signal notifications with full trade details
 - **Backtesting Engine**: Test strategies against historical data
+- **Paper Trading Mode**: Virtual position tracking without real capital
 - **Performance Tracking**: Daily summaries with win rate and strategy breakdown
 
 ## Quick Start
@@ -65,6 +66,12 @@ npm run dev
 
 # Backtesting
 npm run backtest
+
+# Run tests
+npm test
+
+# Syntax checks
+npm run check
 ```
 
 ## How to Get Your API Keys
@@ -163,6 +170,10 @@ A signal must pass ALL of these checks:
 | `NEWS_BUFFER_AFTER_MIN` | 60 | Minutes after news to block |
 | `STRATEGY_*` | true | Enable/disable individual strategies |
 | `CRON_SCHEDULE` | */15 * * * 1-5 | Analysis frequency |
+| `PAPER_TRADING_ENABLED` | false | Enable virtual trade execution |
+| `PAPER_INITIAL_BALANCE` | 10000 | Starting balance for paper mode |
+| `PAPER_MAX_OPEN_POSITIONS` | 3 | Max concurrent paper positions |
+| `HEARTBEAT_MINUTES` | 60 | Metrics heartbeat log interval |
 
 ## Telegram Alert Format
 
