@@ -15,6 +15,7 @@ const metrics = require('./metrics');
 const paperTrader = require('./paperTrader');
 const state = require('./state');
 const healthServer = require('./healthServer');
+const dataCollector = require('./dataCollector');
 
 // Performance tracking
 const stats = {
@@ -70,6 +71,12 @@ async function runAnalysisForTimeframe(timeframe) {
       stats.sessionBlocked++;
       metrics.inc('sessionBlocked');
       logger.info(`[${timeframe}] [SESSION BLOCK] ${session.reason}`);
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_session',
+        reason: session.reason,
+        session: session.session,
+      });
       return;
     }
     logger.info(`[${timeframe}] [Session] ${session.reason}`);
@@ -81,6 +88,12 @@ async function runAnalysisForTimeframe(timeframe) {
       metrics.inc('newsBlocked');
       logger.warn(`[${timeframe}] [NEWS BLOCK ACTIVE] ${news.reason}`);
       await telegram.sendNewsBlock(news.reason);
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_news',
+        reason: news.reason,
+        session: session.session,
+      });
       return;
     }
     if (news.nextEvent) {
@@ -93,6 +106,12 @@ async function runAnalysisForTimeframe(timeframe) {
     if (!candles || candles.length < 50) {
       logger.error(`[${timeframe}] Insufficient candle data for analysis`);
       stats.errors++;
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_data',
+        reason: `Only ${candles?.length || 0} candles available`,
+        session: session.session,
+      });
       return;
     }
 
@@ -132,13 +151,32 @@ async function runAnalysisForTimeframe(timeframe) {
         `Alignment (${alignmentTF || 'none'}): ${alignmentTrend}`
     );
 
+    // Build the feature snapshot ONCE — reused by every downstream decision log.
+    // This is the data future ML training will consume.
+    const featureSnapshot = dataCollector.extractFeatures(indData, {
+      session: session.session,
+      alignment_trend: alignmentTrend,
+      alignment_tf: alignmentTF,
+    });
+    const candlesWindow = dataCollector.compactCandles(candles);
+
     // ── STEP 5: Run All Strategies ──
     const signals = strategies.runAll(indData);
     const bestSignal = strategies.getBestSignal(signals, indData.regime);
 
     if (!bestSignal) {
       logger.info(`[${timeframe}] No valid signals generated`);
-      logger.info(`[${timeframe}] Cycle completed in ${Date.now() - cycleStart}ms`);
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'no_signal',
+        reason: 'No strategy produced a signal',
+        price: currentPrice,
+        features: featureSnapshot,
+        candles_window: candlesWindow,
+      });
+      const cycleDuration = Date.now() - cycleStart;
+      healthServer.markCycle(cycleDuration);
+      logger.info(`[${timeframe}] Cycle completed in ${cycleDuration}ms`);
       return;
     }
 
@@ -179,6 +217,18 @@ async function runAnalysisForTimeframe(timeframe) {
     // Minimum confidence threshold
     if (bestSignal.confidence < 50) {
       logger.info(`[${timeframe}] Signal confidence too low (${bestSignal.confidence}%), skipping`);
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_low_conf',
+        reason: `conf ${bestSignal.confidence}% < 50%`,
+        price: currentPrice,
+        strategy: bestSignal.strategy,
+        direction: bestSignal.signal,
+        final_confidence: bestSignal.confidence,
+        confluence: bestSignal.confluence,
+        features: featureSnapshot,
+        candles_window: candlesWindow,
+      });
       return;
     }
 
@@ -195,11 +245,25 @@ async function runAnalysisForTimeframe(timeframe) {
       // If DXY conflict drops confidence below threshold, skip
       if (bestSignal.confidence < 50) {
         logger.info(`[${timeframe}] DXY conflict dropped confidence below 50%, skipping`);
+        dataCollector.logSignal({
+          timeframe,
+          decision: 'blocked_dxy',
+          reason: `DXY conflict dropped conf to ${bestSignal.confidence}%`,
+          price: currentPrice,
+          strategy: bestSignal.strategy,
+          direction: bestSignal.signal,
+          final_confidence: bestSignal.confidence,
+          features: { ...featureSnapshot, dxy_trend: dxyResult.dxyTrend, dxy_aligned: dxyResult.aligned },
+          candles_window: candlesWindow,
+        });
         return;
       }
     }
     bestSignal.dxyTrend = dxyResult.dxyTrend;
     bestSignal.dxyAligned = dxyResult.aligned;
+    // Enrich feature snapshot with DXY info for downstream logs
+    featureSnapshot.dxy_trend = dxyResult.dxyTrend;
+    featureSnapshot.dxy_aligned = dxyResult.aligned;
 
     // ── STEP 7: Risk Management ──
     const riskParams = riskManager.calculate(
@@ -211,6 +275,26 @@ async function runAnalysisForTimeframe(timeframe) {
     if (!riskParams || !riskManager.validate(riskParams, { atrValues: indData.atr })) {
       logger.warn(`[${timeframe}] Risk/quality validation failed, signal discarded`);
       stats.errors++;
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_risk',
+        reason: 'Risk/quality validation failed',
+        price: currentPrice,
+        strategy: bestSignal.strategy,
+        direction: bestSignal.signal,
+        final_confidence: bestSignal.confidence,
+        features: featureSnapshot,
+        candles_window: candlesWindow,
+        risk: riskParams
+          ? {
+              entry: riskParams.entryPrice,
+              sl: riskParams.stopLoss,
+              tp: riskParams.takeProfit,
+              sl_distance: riskParams.slDistance,
+              spread: riskParams.spread,
+            }
+          : null,
+      });
       return;
     }
 
@@ -236,6 +320,32 @@ async function runAnalysisForTimeframe(timeframe) {
         `[${timeframe}] [AI REJECTED] ${bestSignal.signal} signal — ${aiResult.reason}`
       );
       await telegram.sendAIReject(bestSignal, aiResult, timeframe);
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_ai',
+        reason: aiResult.reason,
+        price: currentPrice,
+        strategy: bestSignal.strategy,
+        direction: bestSignal.signal,
+        final_confidence: bestSignal.confidence,
+        confluence: bestSignal.confluence,
+        features: featureSnapshot,
+        candles_window: candlesWindow,
+        risk: {
+          entry: riskParams.entryPrice,
+          sl: riskParams.stopLoss,
+          tp: riskParams.takeProfit,
+          rr: riskParams.riskRewardRatio,
+          lots: riskParams.lots,
+          sl_distance: riskParams.slDistance,
+        },
+        ai: {
+          source: aiResult.decisionSource,
+          confidence: aiResult.confidence,
+          sentiment: aiResult.sentiment,
+          reason: aiResult.reason,
+        },
+      });
       return;
     }
 
@@ -266,6 +376,17 @@ async function runAnalysisForTimeframe(timeframe) {
     ) {
       const minAgo = Math.round((Date.now() - lastSig.time) / 60000);
       logger.info(`[${timeframe}] Duplicate ${bestSignal.signal} signal skipped (sent ${minAgo}min ago)`);
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_dedupe',
+        reason: `Duplicate of ${bestSignal.signal} sent ${minAgo}min ago`,
+        price: currentPrice,
+        strategy: bestSignal.strategy,
+        direction: bestSignal.signal,
+        final_confidence: bestSignal.confidence,
+        features: featureSnapshot,
+        candles_window: candlesWindow,
+      });
       return;
     }
 
@@ -274,9 +395,45 @@ async function runAnalysisForTimeframe(timeframe) {
     bestSignal.aiSentiment = aiResult.sentiment;
     bestSignal.aiReason = aiResult.reason;
 
+    // Generate signal_id NOW — used for both the dataset log row and the
+    // paper trade so we can JOIN features → outcome during ML training.
+    bestSignal.id = dataCollector.generateId();
+
     // ── STEP 9: Send Alert ──
     await telegram.sendSignal(bestSignal, riskParams, timeframe);
     metrics.inc('signalsSent');
+
+    // Persist the full signal row to the dataset — this is the row that
+    // will later be JOINed with the trade outcome row (via signal_id).
+    dataCollector.logSignal({
+      id: bestSignal.id,
+      timeframe,
+      decision: 'sent',
+      reason: 'All filters passed',
+      price: currentPrice,
+      strategy: bestSignal.strategy,
+      direction: bestSignal.signal,
+      confluence: bestSignal.confluence,
+      raw_confidence: bestSignal.rawConfidence,
+      final_confidence: bestSignal.confidence,
+      features: featureSnapshot,
+      candles_window: candlesWindow,
+      risk: {
+        entry: riskParams.entryPrice,
+        sl: riskParams.stopLoss,
+        tp: riskParams.takeProfit,
+        rr: riskParams.riskRewardRatio,
+        lots: riskParams.lots,
+        sl_distance: riskParams.slDistance,
+        spread: riskParams.spread,
+      },
+      ai: {
+        source: aiResult.decisionSource,
+        confidence: aiResult.confidence,
+        sentiment: aiResult.sentiment,
+        reason: aiResult.reason,
+      },
+    });
 
     if (paperTrader.enabled) {
       const openResult = paperTrader.open(bestSignal, riskParams, timeframe);

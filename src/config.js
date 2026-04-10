@@ -151,6 +151,15 @@ const config = {
     maxOpenPositions: parseInt(process.env.PAPER_MAX_OPEN_POSITIONS) || 3,
     initialBalance: parseFloat(process.env.PAPER_INITIAL_BALANCE) || 10000,
   },
+
+  // Data Collection (ML dataset building)
+  // Writes append-only JSONL files to data/ for future training.
+  // Logs EVERY signal decision (sent AND blocked) to avoid survivorship bias.
+  dataCollection: {
+    enabled: process.env.DATA_COLLECTION_ENABLED !== 'false',
+    logBlocks: process.env.DATA_LOG_BLOCKS !== 'false',
+    candleWindow: parseInt(process.env.DATA_CANDLE_WINDOW) || 50,
+  },
 };
 
 module.exports = config;
