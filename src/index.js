@@ -146,6 +146,15 @@ async function runAnalysisForTimeframe(timeframe) {
       }
     }
 
+    // Apply Asian session confidence penalty (lower gold volatility)
+    if (session.confPenalty && session.confPenalty > 0) {
+      const prevConf = bestSignal.confidence;
+      bestSignal.confidence = Math.max(bestSignal.confidence - session.confPenalty, 25);
+      logger.info(
+        `[${timeframe}] [Asian Session] Confidence ${prevConf}% → ${bestSignal.confidence}% (-${session.confPenalty}%)`
+      );
+    }
+
     // Minimum confidence threshold
     if (bestSignal.confidence < 50) {
       logger.info(`[${timeframe}] Signal confidence too low (${bestSignal.confidence}%), skipping`);

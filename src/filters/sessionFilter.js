@@ -4,26 +4,29 @@ const logger = require('../logger');
 /**
  * Session Filter
  *
- * Only allows trading during active market sessions:
+ * Active sessions for gold trading:
+ * - Asian Session:    00:00 - 08:00 UTC (Tokyo/Sydney — lower volatility)
  * - London Session:   07:00 - 16:00 UTC
  * - New York Session: 12:00 - 21:00 UTC
- * - Overlap (best):   12:00 - 16:00 UTC
+ * - London/NY Overlap: 12:00 - 16:00 UTC (best time)
  *
  * Blocks trading during:
- * - Asian session (low gold volatility)
  * - Market rollover (00:00 - 01:00 UTC)
  * - Weekend (Saturday/Sunday)
- * - Friday late session (21:00+ UTC, liquidity drops)
+ * - Friday late session (20:00+ UTC)
+ *
+ * Asian session is allowed but signals get a confidence penalty
+ * because gold volatility is typically lower during Asian hours.
  */
 
 class SessionFilter {
   /**
    * Check if current time is within an active trading session.
-   * @returns {{allowed: boolean, session: string, reason: string}}
+   * @returns {{allowed: boolean, session: string, reason: string, confPenalty?: number}}
    */
   check() {
     if (!config.sessionFilter.enabled) {
-      return { allowed: true, session: 'all', reason: 'Session filter disabled' };
+      return { allowed: true, session: 'all', reason: 'Session filter disabled', confPenalty: 0 };
     }
 
     const now = new Date();
@@ -51,9 +54,9 @@ class SessionFilter {
       return { allowed: false, session: 'rollover', reason };
     }
 
-    const { london, newYork } = config.sessionFilter;
+    const { asian, london, newYork, asianEnabled, asianConfPenalty } = config.sessionFilter;
 
-    // Compute overlap dynamically (safe if config changes)
+    // Compute London/NY overlap dynamically
     const overlapStart = Math.max(london.start, newYork.start);
     const overlapEnd = Math.min(london.end, newYork.end);
 
@@ -63,6 +66,7 @@ class SessionFilter {
         allowed: true,
         session: 'london-newyork-overlap',
         reason: `London/NY overlap (${overlapStart}:00-${overlapEnd}:00 UTC) — optimal`,
+        confPenalty: 0,
       };
     }
 
@@ -72,6 +76,7 @@ class SessionFilter {
         allowed: true,
         session: 'london',
         reason: 'London session active',
+        confPenalty: 0,
       };
     }
 
@@ -81,6 +86,17 @@ class SessionFilter {
         allowed: true,
         session: 'newyork',
         reason: 'New York session active',
+        confPenalty: 0,
+      };
+    }
+
+    // Asian session (allowed with confidence penalty)
+    if (asianEnabled && utcHour >= asian.start && utcHour < asian.end) {
+      return {
+        allowed: true,
+        session: 'asian',
+        reason: `Asian session active (Tokyo/Sydney) — lower volatility, -${asianConfPenalty}% confidence`,
+        confPenalty: asianConfPenalty,
       };
     }
 
@@ -94,7 +110,7 @@ class SessionFilter {
    * Get the current session name for display.
    */
   getCurrentSession() {
-    const { london, newYork } = config.sessionFilter;
+    const { asian, london, newYork } = config.sessionFilter;
     const now = new Date();
     const h = now.getUTCHours();
 
@@ -104,7 +120,7 @@ class SessionFilter {
     if (h >= overlapStart && h < overlapEnd) return 'London/NY Overlap';
     if (h >= london.start && h < london.end) return 'London';
     if (h >= newYork.start && h < newYork.end) return 'New York';
-    if (h >= 0 && h < london.start) return 'Asian (inactive)';
+    if (h >= asian.start && h < asian.end) return 'Asian (Tokyo/Sydney)';
     return 'Off-hours';
   }
 }

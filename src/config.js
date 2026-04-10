@@ -50,9 +50,12 @@ const config = {
   sessionFilter: {
     enabled: process.env.SESSION_FILTER_ENABLED !== 'false',
     // UTC hours
-    london: { start: 7, end: 16 },
-    newYork: { start: 12, end: 21 },
-    // Combined active window: 07:00 - 21:00 UTC
+    asian: { start: 0, end: 8 },     // Tokyo 09:00-17:00 JST / Sydney 10:00-16:00 AEST
+    london: { start: 7, end: 16 },    // London 07:00-16:00 UTC
+    newYork: { start: 12, end: 21 },  // New York 12:00-21:00 UTC
+    // Asian session: lower gold volatility, allowed with confidence penalty
+    asianEnabled: process.env.SESSION_ASIAN_ENABLED !== 'false',
+    asianConfPenalty: parseInt(process.env.SESSION_ASIAN_PENALTY) || 10,
   },
 
   // Strategies
