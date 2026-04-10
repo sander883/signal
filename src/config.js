@@ -99,6 +99,13 @@ const config = {
     dedupeMinutes: parseInt(process.env.AI_DEDUPE_MIN) || 15,
   },
 
+  // DXY Correlation Filter
+  dxyFilter: {
+    enabled: process.env.DXY_FILTER_ENABLED !== 'false',
+    symbol: process.env.DXY_SYMBOL || 'DXY',
+    timeframe: process.env.DXY_TIMEFRAME || '1h',
+  },
+
   // Risk Management
   risk: {
     accountBalance: parseFloat(process.env.ACCOUNT_BALANCE) || 10000,

@@ -7,11 +7,21 @@ const priceAction = require('./priceAction');
 const logger = require('../logger');
 
 const strategyMap = {
-  trend: { module: trendFollowing, name: 'Trend Following' },
-  scalping: { module: scalping, name: 'Scalping' },
-  breakout: { module: breakout, name: 'Breakout' },
-  meanReversion: { module: meanReversion, name: 'Mean Reversion' },
-  priceAction: { module: priceAction, name: 'Price Action (SMC)' },
+  trend: { module: trendFollowing, name: 'Trend Following', type: 'trend' },
+  scalping: { module: scalping, name: 'Scalping', type: 'momentum' },
+  breakout: { module: breakout, name: 'Breakout', type: 'trend' },
+  meanReversion: { module: meanReversion, name: 'Mean Reversion', type: 'reversal' },
+  priceAction: { module: priceAction, name: 'Price Action (SMC)', type: 'structure' },
+};
+
+// Strategy weights by market regime
+// Higher weight = more trusted in that regime
+const regimeWeights = {
+  trending: { trend: 1.3, momentum: 1.1, structure: 1.0, reversal: 0.5 },
+  'weak-trend': { trend: 1.1, momentum: 1.0, structure: 1.1, reversal: 0.7 },
+  ranging: { trend: 0.5, momentum: 0.8, structure: 0.9, reversal: 1.3 },
+  volatile: { trend: 0.7, momentum: 0.6, structure: 1.0, reversal: 1.0 },
+  unknown: { trend: 1.0, momentum: 1.0, structure: 1.0, reversal: 1.0 },
 };
 
 /**
@@ -21,7 +31,7 @@ const strategyMap = {
 function runAll(indicatorData) {
   const signals = [];
 
-  for (const [key, { module: strat, name }] of Object.entries(strategyMap)) {
+  for (const [key, { module: strat, name, type }] of Object.entries(strategyMap)) {
     if (!config.strategies[key]) {
       logger.debug(`Strategy ${name} is disabled, skipping`);
       continue;
@@ -30,6 +40,7 @@ function runAll(indicatorData) {
     try {
       const result = strat.analyze(indicatorData);
       if (result.signal) {
+        result.strategyType = type;
         signals.push(result);
       }
     } catch (err) {
@@ -45,48 +56,87 @@ function runAll(indicatorData) {
 }
 
 /**
- * Check if multiple strategies agree on direction (confluence).
- * Returns the best signal with adjusted confidence, or null.
+ * Enhanced confluence scoring with regime-weighted confidence.
+ *
+ * Instead of simple count-based bonuses:
+ * 1. Weight each signal by its strategy type's relevance to current regime
+ * 2. Use confidence-weighted voting for direction
+ * 3. Penalize mixed signals more intelligently
  */
-function getBestSignal(signals) {
+function getBestSignal(signals, regime) {
   if (signals.length === 0) return null;
 
-  // Count agreement
-  const buySignals = signals.filter((s) => s.signal === 'BUY');
-  const sellSignals = signals.filter((s) => s.signal === 'SELL');
+  const regimeType = regime && regime.type ? regime.type : 'unknown';
+  const weights = regimeWeights[regimeType] || regimeWeights.unknown;
 
-  let direction, matching;
-  if (buySignals.length >= sellSignals.length) {
-    direction = 'BUY';
-    matching = buySignals;
-  } else {
-    direction = 'SELL';
-    matching = sellSignals;
-  }
+  // Compute weighted confidence for each signal
+  const weighted = signals.map((s) => {
+    const w = weights[s.strategyType] || 1.0;
+    return { ...s, weightedConf: s.confidence * w };
+  });
+
+  // Weighted vote: sum weighted confidence by direction
+  const buyScore = weighted
+    .filter((s) => s.signal === 'BUY')
+    .reduce((sum, s) => sum + s.weightedConf, 0);
+  const sellScore = weighted
+    .filter((s) => s.signal === 'SELL')
+    .reduce((sum, s) => sum + s.weightedConf, 0);
+
+  const direction = buyScore >= sellScore ? 'BUY' : 'SELL';
+  const matching = weighted.filter((s) => s.signal === direction);
+  const opposing = weighted.filter((s) => s.signal !== direction);
 
   if (matching.length === 0) return null;
 
-  // Take highest confidence signal
+  // Sort matching by weighted confidence
+  matching.sort((a, b) => b.weightedConf - a.weightedConf);
   const best = { ...matching[0] };
 
-  // Confluence bonus: multiple strategies agree
-  if (matching.length >= 3) {
-    best.confidence = Math.min(best.confidence + 10, 98);
-    best.confluence = matching.length;
+  // ── Confluence Scoring ──
+  // Weighted average confidence of agreeing strategies
+  const totalWeight = matching.reduce((s, m) => s + (weights[m.strategyType] || 1), 0);
+  const avgWeightedConf = matching.reduce((s, m) => {
+    const w = weights[m.strategyType] || 1;
+    return s + m.confidence * w;
+  }, 0) / totalWeight;
+
+  // Blend: 60% best signal, 40% weighted average (rewards confluence)
+  let finalConfidence = Math.round(best.confidence * 0.6 + avgWeightedConf * 0.4);
+
+  // Confluence bonus based on count
+  if (matching.length >= 4) {
+    finalConfidence += 12;
+  } else if (matching.length >= 3) {
+    finalConfidence += 8;
   } else if (matching.length >= 2) {
-    best.confidence = Math.min(best.confidence + 5, 95);
-    best.confluence = matching.length;
-  } else {
-    best.confluence = 1;
+    finalConfidence += 4;
   }
 
-  // Conflicting signals penalty
-  const opposing = direction === 'BUY' ? sellSignals : buySignals;
+  // Conflicting signals penalty (weighted by opposing confidence)
   if (opposing.length > 0) {
-    best.confidence = Math.max(best.confidence - opposing.length * 5, 30);
+    const maxOpposingConf = Math.max(...opposing.map((o) => o.weightedConf));
+    // High-confidence opposition = bigger penalty
+    const penalty = Math.round(maxOpposingConf * 0.15 * opposing.length);
+    finalConfidence -= Math.min(penalty, 20);
   }
 
+  // Strategy type diversity bonus: different types agreeing = stronger
+  const uniqueTypes = new Set(matching.map((s) => s.strategyType));
+  if (uniqueTypes.size >= 3) finalConfidence += 5;
+  else if (uniqueTypes.size >= 2) finalConfidence += 2;
+
+  best.confidence = Math.min(Math.max(finalConfidence, 25), 98);
+  best.confluence = matching.length;
   best.allStrategies = matching.map((s) => s.strategy).join(', ');
+  best.regimeWeight = weights[best.strategyType] || 1;
+
+  logger.info(
+    `[Confluence] ${direction} x${matching.length} vs ${opposing.length} opposing | ` +
+      `Regime: ${regimeType} (weight: ${best.regimeWeight.toFixed(1)}) | ` +
+      `Final confidence: ${best.confidence}%`
+  );
+
   return best;
 }
 

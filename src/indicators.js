@@ -14,16 +14,25 @@ const logger = require('./logger');
 class Indicators {
   /**
    * Compute all required indicators from candle data.
-   * @param {Array} candles - Array of {open, high, low, close, volume}
-   * @returns {Object} computed indicators
+   * Includes adaptive periods based on current volatility.
    */
   compute(candles) {
     const closes = candles.map((c) => c.close);
     const highs = candles.map((c) => c.high);
     const lows = candles.map((c) => c.low);
     const opens = candles.map((c) => c.open);
+    const volumes = candles.map((c) => c.volume || 0);
 
     const ind = config.indicators;
+
+    // ── Adaptive Periods ──
+    // In high volatility: use longer periods to filter noise
+    // In low volatility: use shorter periods for quicker signals
+    const adaptiveFactor = this._getAdaptiveFactor(highs, lows, closes);
+
+    const rsiPeriod = this._adaptPeriod(ind.rsi.period, adaptiveFactor, 10, 21);
+    const bbPeriod = this._adaptPeriod(ind.bb.period, adaptiveFactor, 14, 30);
+    const atrPeriod = this._adaptPeriod(ind.atr.period, adaptiveFactor, 10, 21);
 
     const result = {
       candles,
@@ -31,17 +40,19 @@ class Indicators {
       highs,
       lows,
       opens,
+      volumes,
+      adaptiveFactor, // expose for strategies
 
-      // EMAs
+      // EMAs (fixed periods — trend structure shouldn't adapt)
       ema9: EMA.calculate({ period: ind.ema.fast, values: closes }),
       ema21: EMA.calculate({ period: ind.ema.medium, values: closes }),
       ema50: EMA.calculate({ period: ind.ema.slow, values: closes }),
       ema200: EMA.calculate({ period: ind.ema.trend, values: closes }),
 
-      // RSI
-      rsi: RSI.calculate({ period: ind.rsi.period, values: closes }),
+      // RSI (adaptive)
+      rsi: RSI.calculate({ period: rsiPeriod, values: closes }),
 
-      // MACD
+      // MACD (fixed — uses EMA internally)
       macd: MACD.calculate({
         values: closes,
         fastPeriod: ind.macd.fast,
@@ -51,16 +62,16 @@ class Indicators {
         SimpleMASignal: false,
       }),
 
-      // Bollinger Bands
+      // Bollinger Bands (adaptive period)
       bb: BollingerBands.calculate({
-        period: ind.bb.period,
+        period: bbPeriod,
         values: closes,
         stdDev: ind.bb.stdDev,
       }),
 
-      // ATR
+      // ATR (adaptive)
       atr: ATR.calculate({
-        period: ind.atr.period,
+        period: atrPeriod,
         high: highs,
         low: lows,
         close: closes,
@@ -73,62 +84,264 @@ class Indicators {
         high: highs,
         low: lows,
       }),
+
+      // Stochastic (momentum crossover)
+      stoch: Stochastic.calculate({
+        high: highs,
+        low: lows,
+        close: closes,
+        period: 14,
+        signalPeriod: 3,
+      }),
     };
 
-    // Support / Resistance levels (swing highs / lows)
-    result.supportResistance = this._findSupportResistance(candles);
+    // VWAP
+    result.vwap = this._computeVWAP(candles);
 
-    // Supply / Demand zones
+    // Market Regime detection
+    result.regime = this._detectRegime(result);
+
+    // Support / Resistance (improved with clustering)
+    result.supportResistance = this._findSupportResistance(candles, result.atr);
+
+    // Supply / Demand zones (fixed edge cases)
     result.supplyDemand = this._findSupplyDemandZones(candles);
 
     // BOS / CHOCH detection
     result.structureBreaks = this._detectStructureBreaks(candles);
 
-    logger.debug(`Indicators computed: ${closes.length} candles`);
+    logger.debug(
+      `Indicators computed: ${closes.length} candles | regime: ${result.regime.type} | ` +
+        `adaptive: ${adaptiveFactor.toFixed(2)} | RSI period: ${rsiPeriod}`
+    );
     return result;
   }
 
+  // ══════════════════════════════════════════
+  // ADAPTIVE INDICATOR PERIODS
+  // ══════════════════════════════════════════
+
   /**
-   * Find support and resistance from recent swing highs/lows.
+   * Compute adaptive factor based on current vs historical volatility.
+   * >1 = high volatility (use longer periods), <1 = low volatility (shorter).
    */
-  _findSupportResistance(candles, lookback = 20) {
+  _getAdaptiveFactor(highs, lows, closes) {
+    if (closes.length < 50) return 1.0;
+
+    // Recent ATR (last 14 candles) vs historical ATR (last 50)
+    const recentATR = this._simpleATR(highs.slice(-14), lows.slice(-14), closes.slice(-14));
+    const historicalATR = this._simpleATR(highs.slice(-50), lows.slice(-50), closes.slice(-50));
+
+    if (historicalATR === 0) return 1.0;
+    const ratio = recentATR / historicalATR;
+
+    // Clamp between 0.7 and 1.5
+    return Math.max(0.7, Math.min(1.5, ratio));
+  }
+
+  _simpleATR(highs, lows, closes) {
+    let sum = 0;
+    for (let i = 1; i < highs.length; i++) {
+      const tr = Math.max(
+        highs[i] - lows[i],
+        Math.abs(highs[i] - closes[i - 1]),
+        Math.abs(lows[i] - closes[i - 1])
+      );
+      sum += tr;
+    }
+    return sum / (highs.length - 1) || 0;
+  }
+
+  _adaptPeriod(basePeriod, factor, min, max) {
+    return Math.round(Math.max(min, Math.min(max, basePeriod * factor)));
+  }
+
+  // ══════════════════════════════════════════
+  // VWAP (Volume Weighted Average Price)
+  // ══════════════════════════════════════════
+
+  /**
+   * Compute cumulative VWAP and upper/lower bands.
+   * Acts as dynamic support/resistance based on volume.
+   */
+  _computeVWAP(candles) {
+    if (candles.length < 10) return { values: [], upper: [], lower: [] };
+
+    const values = [];
+    let cumVolPrice = 0;
+    let cumVol = 0;
+    let cumVP2 = 0; // for std dev bands
+
+    // Use last 50 candles for intraday VWAP
+    const recent = candles.slice(-50);
+
+    for (let i = 0; i < recent.length; i++) {
+      const c = recent[i];
+      const typicalPrice = (c.high + c.low + c.close) / 3;
+      const vol = c.volume || 1; // fallback if no volume
+
+      cumVolPrice += typicalPrice * vol;
+      cumVol += vol;
+      cumVP2 += typicalPrice * typicalPrice * vol;
+
+      const vwap = cumVolPrice / cumVol;
+      const variance = cumVP2 / cumVol - vwap * vwap;
+      const stdDev = Math.sqrt(Math.max(0, variance));
+
+      values.push(vwap);
+    }
+
+    // Compute bands from last VWAP stddev
+    const lastVwap = values[values.length - 1];
+    const lastTP = (recent[recent.length - 1].high + recent[recent.length - 1].low + recent[recent.length - 1].close) / 3;
+    const lastVariance = cumVP2 / cumVol - lastVwap * lastVwap;
+    const lastStdDev = Math.sqrt(Math.max(0, lastVariance));
+
+    return {
+      values,
+      current: lastVwap,
+      upper: lastVwap + lastStdDev * 2,
+      lower: lastVwap - lastStdDev * 2,
+      stdDev: lastStdDev,
+    };
+  }
+
+  // ══════════════════════════════════════════
+  // MARKET REGIME DETECTION
+  // ══════════════════════════════════════════
+
+  /**
+   * Detect current market regime: trending, ranging, or volatile.
+   * Used by strategies to adapt their behavior.
+   */
+  _detectRegime(data) {
+    const result = { type: 'unknown', strength: 0, direction: 'neutral' };
+
+    const adxVal = this.latest(data.adx);
+    const currEma50 = this.latest(data.ema50);
+    const currEma200 = this.latest(data.ema200);
+    const currAtr = this.latest(data.atr);
+    const prevAtr = this.latest(data.atr, 5);
+
+    if (!adxVal || !currEma50 || !currEma200) return result;
+
+    const adx = adxVal.adx;
+
+    // Trending: ADX > 25, EMAs separated
+    if (adx > 25) {
+      result.type = 'trending';
+      result.strength = Math.min(100, Math.round(adx));
+      result.direction = currEma50 > currEma200 ? 'bullish' : 'bearish';
+    }
+    // Volatile: ADX low but ATR spiking
+    else if (currAtr && prevAtr && currAtr > prevAtr * 1.5) {
+      result.type = 'volatile';
+      result.strength = Math.round((currAtr / prevAtr) * 50);
+      result.direction = 'neutral';
+    }
+    // Ranging: ADX < 20, EMAs close together
+    else if (adx < 20) {
+      result.type = 'ranging';
+      result.strength = Math.round(20 - adx);
+      result.direction = 'neutral';
+    }
+    // Weak trend
+    else {
+      result.type = 'weak-trend';
+      result.strength = Math.round(adx);
+      result.direction = currEma50 > currEma200 ? 'bullish' : 'bearish';
+    }
+
+    return result;
+  }
+
+  // ══════════════════════════════════════════
+  // SUPPORT / RESISTANCE (Improved with clustering)
+  // ══════════════════════════════════════════
+
+  /**
+   * Find support and resistance with ATR-based clustering.
+   * Levels within 0.5 ATR of each other are merged into one.
+   */
+  _findSupportResistance(candles, atrValues) {
     const levels = { support: [], resistance: [] };
-    const recent = candles.slice(-100);
+    const recent = candles.slice(-120);
+    if (recent.length < 30) return levels;
 
-    for (let i = lookback; i < recent.length - lookback; i++) {
-      const window = recent.slice(i - lookback, i + lookback + 1);
-      const high = recent[i].high;
-      const low = recent[i].low;
+    const atr = this.latest(atrValues) || 5;
+    const clusterDistance = atr * 0.5;
 
-      // Swing high: highest in window
-      const isSwingHigh = window.every((c) => c.high <= high);
-      if (isSwingHigh) {
-        levels.resistance.push(high);
-      }
+    // Use multiple lookback windows (5, 10, 15) for different scale swing points
+    for (const lookback of [5, 10, 15]) {
+      for (let i = lookback; i < recent.length - lookback; i++) {
+        const candle = recent[i];
+        const windowBefore = recent.slice(i - lookback, i);
+        const windowAfter = recent.slice(i + 1, i + lookback + 1);
+        const window = [...windowBefore, ...windowAfter];
 
-      // Swing low: lowest in window
-      const isSwingLow = window.every((c) => c.low >= low);
-      if (isSwingLow) {
-        levels.support.push(low);
+        // Swing high
+        if (window.every((c) => c.high <= candle.high)) {
+          levels.resistance.push({ price: candle.high, strength: lookback });
+        }
+        // Swing low
+        if (window.every((c) => c.low >= candle.low)) {
+          levels.support.push({ price: candle.low, strength: lookback });
+        }
       }
     }
 
-    // Keep most recent levels
-    levels.support = [...new Set(levels.support)].slice(-5);
-    levels.resistance = [...new Set(levels.resistance)].slice(-5);
+    // Cluster nearby levels (merge within clusterDistance)
+    levels.resistance = this._clusterLevels(levels.resistance, clusterDistance);
+    levels.support = this._clusterLevels(levels.support, clusterDistance);
 
     return levels;
   }
 
   /**
-   * Supply/Demand zone identification.
-   * Supply zone: sharp bearish move after consolidation.
-   * Demand zone: sharp bullish move after consolidation.
+   * Merge price levels that are close together.
+   * Returns array of prices sorted by strength (most tested first).
    */
+  _clusterLevels(levels, distance) {
+    if (levels.length === 0) return [];
+
+    // Sort by price
+    levels.sort((a, b) => a.price - b.price);
+
+    const clusters = [];
+    let cluster = [levels[0]];
+
+    for (let i = 1; i < levels.length; i++) {
+      if (levels[i].price - cluster[cluster.length - 1].price <= distance) {
+        cluster.push(levels[i]);
+      } else {
+        clusters.push(cluster);
+        cluster = [levels[i]];
+      }
+    }
+    clusters.push(cluster);
+
+    // Each cluster → single level (weighted average price, strength = count)
+    return clusters
+      .map((c) => {
+        const totalStrength = c.reduce((s, l) => s + l.strength, 0);
+        const avgPrice = c.reduce((s, l) => s + l.price * l.strength, 0) / totalStrength;
+        return { price: Math.round(avgPrice * 100) / 100, touches: c.length, strength: totalStrength };
+      })
+      .sort((a, b) => b.touches - a.touches) // most tested first
+      .slice(0, 8) // keep top 8
+      .map((l) => l.price);
+  }
+
+  // ══════════════════════════════════════════
+  // SUPPLY / DEMAND ZONES (Fixed edge cases)
+  // ══════════════════════════════════════════
+
   _findSupplyDemandZones(candles) {
     const zones = { supply: [], demand: [] };
     const recent = candles.slice(-80);
-    const threshold = 0.003; // 0.3% move threshold for gold
+    if (recent.length < 10) return zones;
+
+    const threshold = 0.003; // 0.3%
 
     for (let i = 2; i < recent.length - 1; i++) {
       const prev = recent[i - 1];
@@ -138,43 +351,43 @@ class Indicators {
         recent.slice(Math.max(0, i - 10), i).reduce((s, c) => s + Math.abs(c.close - c.open), 0) /
         Math.min(i, 10);
 
-      // Large bullish candle = demand zone at its base
+      if (avgBody === 0) continue; // avoid division by zero
+
+      // Demand zone: large bullish candle
       if (curr.close > curr.open && bodySize > avgBody * 2 && bodySize / curr.open > threshold) {
-        zones.demand.push({
-          high: Math.max(curr.open, prev.low),
-          low: Math.min(curr.open, prev.low),
-          strength: bodySize / avgBody,
-        });
+        const zoneLow = Math.min(curr.open, prev.low);
+        const zoneHigh = Math.max(curr.open, prev.low);
+        // Validate zone has positive width
+        if (zoneHigh > zoneLow) {
+          zones.demand.push({ high: zoneHigh, low: zoneLow, strength: bodySize / avgBody });
+        }
       }
 
-      // Large bearish candle = supply zone at its top
+      // Supply zone: large bearish candle
       if (curr.open > curr.close && bodySize > avgBody * 2 && bodySize / curr.open > threshold) {
-        zones.supply.push({
-          high: Math.max(curr.open, prev.high),
-          low: Math.min(curr.open, prev.high),
-          strength: bodySize / avgBody,
-        });
+        const zoneLow = Math.min(curr.open, prev.high);
+        const zoneHigh = Math.max(curr.open, prev.high);
+        if (zoneHigh > zoneLow) {
+          zones.supply.push({ high: zoneHigh, low: zoneLow, strength: bodySize / avgBody });
+        }
       }
     }
 
-    // Keep strongest zones
     zones.supply = zones.supply.sort((a, b) => b.strength - a.strength).slice(0, 5);
     zones.demand = zones.demand.sort((a, b) => b.strength - a.strength).slice(0, 5);
 
     return zones;
   }
 
-  /**
-   * Detect Break of Structure (BOS) and Change of Character (CHOCH).
-   * BOS: Price breaks previous swing high/low in trend direction.
-   * CHOCH: Price breaks against the trend direction, signaling reversal.
-   */
+  // ══════════════════════════════════════════
+  // BOS / CHOCH DETECTION
+  // ══════════════════════════════════════════
+
   _detectStructureBreaks(candles) {
     const result = { bos: null, choch: null, trend: 'neutral' };
     const recent = candles.slice(-60);
     if (recent.length < 20) return result;
 
-    // Find swing points
     const swingHighs = [];
     const swingLows = [];
 
@@ -196,7 +409,6 @@ class Indicators {
     const prevLow = swingLows[swingLows.length - 2];
     const currentPrice = recent[recent.length - 1].close;
 
-    // Determine current structure trend
     const higherHighs = lastHigh.price > prevHigh.price;
     const higherLows = lastLow.price > prevLow.price;
     const lowerHighs = lastHigh.price < prevHigh.price;
@@ -205,14 +417,18 @@ class Indicators {
     if (higherHighs && higherLows) result.trend = 'bullish';
     else if (lowerHighs && lowerLows) result.trend = 'bearish';
 
-    // BOS: Break in trend direction
-    if (result.trend === 'bullish' && currentPrice > lastHigh.price) {
+    // BOS: only detect if the break is RECENT (within last 3 candles)
+    const priceJustBrokeHigh = currentPrice > lastHigh.price &&
+      recent.length - 1 - lastHigh.index <= 10;
+    const priceJustBrokeLow = currentPrice < lastLow.price &&
+      recent.length - 1 - lastLow.index <= 10;
+
+    if (result.trend === 'bullish' && priceJustBrokeHigh) {
       result.bos = { direction: 'bullish', level: lastHigh.price };
-    } else if (result.trend === 'bearish' && currentPrice < lastLow.price) {
+    } else if (result.trend === 'bearish' && priceJustBrokeLow) {
       result.bos = { direction: 'bearish', level: lastLow.price };
     }
 
-    // CHOCH: Break against trend direction (reversal signal)
     if (result.trend === 'bullish' && currentPrice < lastLow.price) {
       result.choch = { direction: 'bearish', level: lastLow.price };
     } else if (result.trend === 'bearish' && currentPrice > lastHigh.price) {
@@ -223,7 +439,7 @@ class Indicators {
   }
 
   /**
-   * Get the latest value from an indicator array, aligned to candle index.
+   * Get the latest value from an indicator array.
    */
   latest(arr, offset = 0) {
     if (!arr || arr.length === 0) return null;

@@ -6,6 +6,7 @@ const indicators = require('./indicators');
 const strategies = require('./strategies');
 const newsFilter = require('./filters/newsFilter');
 const sessionFilter = require('./filters/sessionFilter');
+const dxyFilter = require('./filters/dxyFilter');
 const riskManager = require('./risk');
 const aiAgent = require('./aiAgent');
 const telegram = require('./telegram');
@@ -102,12 +103,19 @@ async function runAnalysisForTimeframe(timeframe) {
 
     // ── STEP 5: Run All Strategies ──
     const signals = strategies.runAll(indData);
-    const bestSignal = strategies.getBestSignal(signals);
+    const bestSignal = strategies.getBestSignal(signals, indData.regime);
 
     if (!bestSignal) {
       logger.info(`[${timeframe}] No valid signals generated`);
       logger.info(`[${timeframe}] Cycle completed in ${Date.now() - cycleStart}ms`);
       return;
+    }
+
+    // Log market regime
+    if (indData.regime) {
+      logger.info(
+        `[${timeframe}] [Regime] ${indData.regime.type} (strength: ${indData.regime.strength}, dir: ${indData.regime.direction})`
+      );
     }
 
     // ── STEP 6: Trend Alignment Check ──
@@ -133,6 +141,25 @@ async function runAnalysisForTimeframe(timeframe) {
       logger.info(`[${timeframe}] Signal confidence too low (${bestSignal.confidence}%), skipping`);
       return;
     }
+
+    // ── STEP 6b: DXY Correlation Filter ──
+    const dxyResult = await dxyFilter.check(bestSignal.signal);
+    if (dxyResult.score !== 0) {
+      const prevConf = bestSignal.confidence;
+      bestSignal.confidence = Math.min(Math.max(bestSignal.confidence + dxyResult.score, 25), 98);
+      logger.info(
+        `[${timeframe}] [DXY] ${dxyResult.reason} | Score: ${dxyResult.score > 0 ? '+' : ''}${dxyResult.score} | ` +
+          `Confidence: ${prevConf}% → ${bestSignal.confidence}%`
+      );
+
+      // If DXY conflict drops confidence below threshold, skip
+      if (bestSignal.confidence < 50) {
+        logger.info(`[${timeframe}] DXY conflict dropped confidence below 50%, skipping`);
+        return;
+      }
+    }
+    bestSignal.dxyTrend = dxyResult.dxyTrend;
+    bestSignal.dxyAligned = dxyResult.aligned;
 
     // ── STEP 7: Risk Management ──
     const riskParams = riskManager.calculate(
