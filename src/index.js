@@ -349,6 +349,45 @@ async function runAnalysisForTimeframe(timeframe) {
       return;
     }
 
+    // Blend strategy confidence with AI confidence before final execution.
+    // This prevents high strategy confidence from bypassing weak AI approval.
+    const preAiBlendConf = bestSignal.confidence;
+    bestSignal.confidence = aiAgent.deriveFinalConfidence(bestSignal.confidence, aiResult);
+    logger.info(
+      `[${timeframe}] [AI Blend] ${preAiBlendConf}% + AI(${aiResult.confidence}%, ${aiResult.decisionSource}) → ${bestSignal.confidence}%`
+    );
+
+    if (bestSignal.confidence < 50) {
+      logger.warn(`[${timeframe}] Confidence dropped below 50% after AI blend, skipping`);
+      dataCollector.logSignal({
+        timeframe,
+        decision: 'blocked_ai_blend',
+        reason: `AI blend dropped conf to ${bestSignal.confidence}%`,
+        price: currentPrice,
+        strategy: bestSignal.strategy,
+        direction: bestSignal.signal,
+        final_confidence: bestSignal.confidence,
+        confluence: bestSignal.confluence,
+        features: featureSnapshot,
+        candles_window: candlesWindow,
+        risk: {
+          entry: riskParams.entryPrice,
+          sl: riskParams.stopLoss,
+          tp: riskParams.takeProfit,
+          rr: riskParams.riskRewardRatio,
+          lots: riskParams.lots,
+          sl_distance: riskParams.slDistance,
+        },
+        ai: {
+          source: aiResult.decisionSource,
+          confidence: aiResult.confidence,
+          sentiment: aiResult.sentiment,
+          reason: aiResult.reason,
+        },
+      });
+      return;
+    }
+
     // Apply AI adjustments to risk params if provided, then re-validate
     if (aiResult.adjustedSignal) {
       if (aiResult.adjustedSignal.entryPrice) riskParams.entryPrice = aiResult.adjustedSignal.entryPrice;

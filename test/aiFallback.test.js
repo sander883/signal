@@ -60,3 +60,38 @@ test('AI fallback (normal mode): approves grey zone with penalty', async () => {
   assert.equal(result.approved, true, 'normal mode approves grey zone');
   assert.equal(result.confidence, 45, 'should apply 10 point penalty');
 });
+
+test('AI parse error follows strict fallback (rejects low confidence)', () => {
+  process.env.AI_FALLBACK_MODE = 'strict';
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/aiAgent')];
+  const strictAgent = require('../src/aiAgent');
+
+  const result = strictAgent._parseValidationResponse('invalid-json', {
+    signal: 'BUY',
+    confidence: 60,
+  });
+  assert.equal(result.approved, false);
+  assert.equal(result.decisionSource, 'strict_reject');
+});
+
+test('AI confidence blend: model source uses weighted average', () => {
+  const result = aiAgent.deriveFinalConfidence(80, { confidence: 60, decisionSource: 'model' });
+  assert.equal(result, 72);
+});
+
+test('AI confidence blend: fallback source takes lower confidence', () => {
+  const result = aiAgent.deriveFinalConfidence(82, { confidence: 68, decisionSource: 'rate_limited' });
+  assert.equal(result, 68);
+});
+
+test('AI confidence blend: model source cannot inflate above strategy confidence', () => {
+  const result = aiAgent.deriveFinalConfidence(70, { confidence: 95, decisionSource: 'model' });
+  assert.equal(result, 70);
+});
+
+test('AI parse error: handles missing original signal safely', () => {
+  const result = aiAgent._parseValidationResponse('invalid-json');
+  assert.equal(typeof result.approved, 'boolean');
+  assert.ok(result.confidence >= 0 && result.confidence <= 100);
+});
