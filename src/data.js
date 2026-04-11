@@ -15,6 +15,31 @@ const TF_MS = {
 };
 const STALE_MULTIPLIER = 3; // Fresh = < 3 × interval
 
+/**
+ * Strip the last candle if it is still forming (its bar period has not
+ * yet ended). Prevents look-ahead bias and mid-bar signal flapping, as
+ * the close of a forming bar is a moving target until the period ends.
+ *
+ * Heuristic: if candle[last].time + TF_MS > now, the bar is still open.
+ */
+function stripFormingBar(candles, timeframe) {
+  if (!candles || candles.length === 0) return candles;
+  const tfMs = TF_MS[timeframe];
+  if (!tfMs) return candles;
+  const last = candles[candles.length - 1];
+  if (!last || !last.time) return candles;
+  // Providers return UTC-ish strings. Append 'Z' if not timezone-aware.
+  const iso = /Z$|[+-]\d{2}:?\d{2}$/.test(last.time) ? last.time : `${last.time.replace(' ', 'T')}Z`;
+  const lastOpenMs = Date.parse(iso);
+  if (!Number.isFinite(lastOpenMs)) return candles;
+  const barCloseMs = lastOpenMs + tfMs;
+  if (barCloseMs > Date.now()) {
+    // Still forming — drop it
+    return candles.slice(0, -1);
+  }
+  return candles;
+}
+
 class MarketData {
   constructor() {
     this.cache = new Map();
@@ -86,6 +111,14 @@ class MarketData {
 
       if (!candles) {
         throw lastErr || new Error('All data providers failed');
+      }
+
+      // Strip the in-progress/forming candle so strategies only see closed
+      // bars. Critical for preventing look-ahead and mid-bar signal flapping.
+      const beforeCount = candles.length;
+      candles = stripFormingBar(candles, timeframe);
+      if (candles.length < beforeCount) {
+        logger.debug(`[${timeframe}] Dropped forming bar — now ${candles.length} closed candles`);
       }
 
       this.cache.set(cacheKey, { data: candles, ts: Date.now() });

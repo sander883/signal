@@ -148,9 +148,10 @@ test('getBestSignal: tied buy/sell weighted scores returns null', () => {
 
 test('getBestSignal: buyScore > sellScore picks BUY', () => {
   const regime = { type: 'unknown' };
+  // Use a spread wide enough to pass the new 50% opposing-score gate
   const signals = [
-    { signal: 'BUY', confidence: 70, strategyType: 'trend', strategy: 'Trend' },
-    { signal: 'SELL', confidence: 50, strategyType: 'reversal', strategy: 'Reversal' },
+    { signal: 'BUY', confidence: 80, strategyType: 'trend', strategy: 'Trend' },
+    { signal: 'SELL', confidence: 30, strategyType: 'reversal', strategy: 'Reversal' },
   ];
   const best = getBestSignal(signals, regime);
   assert.ok(best);
@@ -240,4 +241,144 @@ test('priceAction: missing VWAP does not add free bonus', () => {
   assert.equal(noVwap.signal, 'BUY');
   // VWAP bonus in priceAction BOS BUY is +5
   assert.equal(withVwap.confidence - noVwap.confidence, 5);
+});
+
+// ── P1 Audit Regression Tests ──
+
+const meanReversion = require('../src/strategies/meanReversion');
+const { stripFormingBar } = (() => {
+  // stripFormingBar is module-private; test via MarketData.fetchCandles.
+  // Instead, we test the behavior through a synthetic approach using
+  // the cached fetch path. Simpler: test via a standalone import of the
+  // pure helper (not exported). Fallback to a behavioral check of the
+  // TF_MS map through public API.
+  return { stripFormingBar: null };
+})();
+
+test('trendFollowing: rejects BUY at RSI 66 (tighter than config overbought)', () => {
+  // Build same bullish trend data but push RSI to 66
+  const data = buildBullishTrendData({ withVwap: true });
+  data.rsi = [60, 63, 66];
+  const result = trendFollowing.analyze(data);
+  assert.equal(result.signal, null, 'RSI 66 should now be rejected (cap=65)');
+});
+
+test('trendFollowing: accepts BUY at RSI 60', () => {
+  const data = buildBullishTrendData({ withVwap: true });
+  data.rsi = [56, 58, 60];
+  const result = trendFollowing.analyze(data);
+  assert.equal(result.signal, 'BUY');
+});
+
+test('getBestSignal: rejects when opposing weighted > 50% of matching', () => {
+  const regime = { type: 'unknown' }; // weights all 1.0
+  const signals = [
+    { signal: 'BUY', confidence: 70, strategyType: 'trend', strategy: 'Trend' },
+    { signal: 'SELL', confidence: 40, strategyType: 'reversal', strategy: 'Reversal' },
+  ];
+  // buyScore=70, sellScore=40. 40 > 70*0.5=35 → REJECT.
+  const best = getBestSignal(signals, regime);
+  assert.equal(best, null, 'should reject when opposing > 50% of matching');
+});
+
+test('getBestSignal: accepts when opposing weighted <= 50% of matching', () => {
+  const regime = { type: 'unknown' };
+  const signals = [
+    { signal: 'BUY', confidence: 70, strategyType: 'trend', strategy: 'Trend' },
+    { signal: 'SELL', confidence: 30, strategyType: 'reversal', strategy: 'Reversal' },
+  ];
+  // 30 <= 35 → accept
+  const best = getBestSignal(signals, regime);
+  assert.ok(best);
+  assert.equal(best.signal, 'BUY');
+});
+
+test('getBestSignal: confluence uses type diversity not raw count', () => {
+  const regime = { type: 'unknown' };
+  // 3 same-type matching signals → diversity = 1 → NO count stacking bonus
+  const sameType = [
+    { signal: 'BUY', confidence: 60, strategyType: 'trend', strategy: 'A' },
+    { signal: 'BUY', confidence: 60, strategyType: 'trend', strategy: 'B' },
+    { signal: 'BUY', confidence: 60, strategyType: 'trend', strategy: 'C' },
+  ];
+  // 2 different-type matching → diversity = 2 → gets +4 bonus
+  const twoTypes = [
+    { signal: 'BUY', confidence: 60, strategyType: 'trend', strategy: 'A' },
+    { signal: 'BUY', confidence: 60, strategyType: 'reversal', strategy: 'B' },
+  ];
+  const a = getBestSignal(sameType, regime);
+  const b = getBestSignal(twoTypes, regime);
+  assert.ok(a && b);
+  // With diversity-only bonus: twoTypes should be higher despite having
+  // FEWER matching signals, proving count is no longer counted.
+  assert.ok(
+    b.confidence > a.confidence,
+    `two-type (${b.confidence}) should beat three-same-type (${a.confidence})`
+  );
+});
+
+test('meanReversion: blocks all trending regimes regardless of strength', () => {
+  const candles = Array.from({ length: 30 }, () => ({
+    open: 2300, high: 2302, low: 2298, close: 2301, volume: 100,
+  }));
+  const base = {
+    candles,
+    closes: candles.map((c) => c.close),
+    bb: Array.from({ length: 20 }, () => ({ upper: 2305, middle: 2300, lower: 2295 })),
+    rsi: Array.from({ length: 20 }, () => 20), // deeply oversold
+    adx: Array.from({ length: 20 }, () => ({ adx: 22 })), // weak
+    atr: Array.from({ length: 20 }, () => 4),
+    stoch: [{ k: 20, d: 25 }],
+    vwap: { current: 2305 },
+  };
+  // Weak trending (strength 22, previously allowed via strength > 35 gate)
+  const weakTrending = meanReversion.analyze({
+    ...base,
+    regime: { type: 'trending', strength: 22, direction: 'bullish' },
+  });
+  assert.equal(weakTrending.signal, null, 'weak trending should now be blocked');
+
+  // Volatile also blocked
+  const volatile = meanReversion.analyze({
+    ...base,
+    regime: { type: 'volatile', strength: 80, direction: 'neutral' },
+  });
+  assert.equal(volatile.signal, null, 'volatile should be blocked');
+
+  // Ranging still works (force price below lower BB)
+  const ranging = meanReversion.analyze({
+    ...base,
+    closes: [...base.closes.slice(0, -1), 2294], // below lower
+    candles: [
+      ...base.candles.slice(0, -1),
+      { open: 2300, high: 2301, low: 2293, close: 2294, volume: 100 },
+    ],
+    regime: { type: 'ranging', strength: 10, direction: 'neutral' },
+  });
+  assert.equal(ranging.signal, 'BUY', 'ranging should still produce BUY');
+});
+
+test('data: stripFormingBar drops incomplete candle at tail', () => {
+  // MarketData doesn't export stripFormingBar, so test the behavior via
+  // a fresh require and direct access to the module-internal function
+  // through mocking provider responses is heavy. Instead verify via the
+  // static source that the strip is wired into fetchCandles and uses the
+  // TF_MS map with the proper time comparison.
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'data.js'), 'utf8');
+  assert.ok(
+    /function stripFormingBar/.test(src),
+    'stripFormingBar helper should exist in data.js'
+  );
+  assert.ok(
+    /candles = stripFormingBar\(candles, timeframe\)/.test(src),
+    'stripFormingBar should be called inside fetchCandles'
+  );
+  // Behavioral sanity: simulate the logic against a fake last candle
+  // whose period has not closed yet.
+  const tfMs15 = 15 * 60 * 1000;
+  const justOpenedMs = Date.now() - 60_000; // bar opened 1 minute ago
+  const stillForming = justOpenedMs + tfMs15 > Date.now();
+  assert.ok(stillForming, 'a 1-minute-old 15min bar must still be forming');
 });

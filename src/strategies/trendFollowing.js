@@ -69,7 +69,10 @@ function analyze(data) {
   const priceBelowVwap = hasVwap && currentPrice < vwap.current;
 
   // ── BUY Signal ──
-  if (bullishTrend && macdBullish && currentRsi < config.indicators.rsi.overbought) {
+  // Tighter RSI cap than global overbought (70): entering at RSI 68 is
+  // catching the tail of a move. Require room to run (< 65).
+  const trendRsiBuyCap = 65;
+  if (bullishTrend && macdBullish && currentRsi < trendRsiBuyCap) {
     let confidence = 45;
 
     // ADX strength bonus
@@ -105,7 +108,10 @@ function analyze(data) {
   }
 
   // ── SELL Signal ──
-  if (!result.signal && bearishTrend && macdBearish && currentRsi > config.indicators.rsi.oversold) {
+  // Symmetric tighter oversold cap: entering SELL at RSI 32 is catching
+  // the tail of a down move. Require > 35.
+  const trendRsiSellCap = 35;
+  if (!result.signal && bearishTrend && macdBearish && currentRsi > trendRsiSellCap) {
     let confidence = 45;
 
     if (adxValue > 30) confidence += 8;

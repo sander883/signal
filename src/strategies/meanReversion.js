@@ -36,14 +36,18 @@ function analyze(data) {
   const bbWidth = (upper - lower) / middle;
 
   // ── Market Regime Filter ──
-  // Mean reversion works best in ranging markets, bad in strong trends
-  if (regime && regime.type === 'trending' && regime.strength > 35) {
-    return result; // Strong trend = don't fade it
+  // Mean reversion is fighting the trend. Block ALL trending regimes
+  // regardless of strength — previously we allowed ADX 25-34 through
+  // via the `strength > 35` escape, which meant fading nascent trends.
+  // Volatile regimes are also unsafe (whipsaw stops).
+  if (regime && (regime.type === 'trending' || regime.type === 'volatile')) {
+    return result;
   }
 
-  // ADX filter: prefer ranging (ADX < 30), but adapt thresholds
+  // ADX filter: prefer ranging (ADX < 25). Tighter than the old < 30
+  // to avoid the grey zone where trends often develop.
   const adxValue = currentAdx ? currentAdx.adx : 0;
-  const isRanging = adxValue < 30;
+  const isRanging = adxValue < 25;
   if (!isRanging) return result;
 
   // ── Regime-Aware RSI Thresholds ──

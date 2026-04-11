@@ -94,6 +94,19 @@ function getBestSignal(signals, regime) {
 
   if (matching.length === 0) return null;
 
+  // ── Aggressive conflict rejection ──
+  // If opposing weighted score is more than 50% of matching score, the
+  // market is too split to call. Refuse to force a signal.
+  const matchingScore = direction === 'BUY' ? buyScore : sellScore;
+  const opposingScore = direction === 'BUY' ? sellScore : buyScore;
+  if (opposingScore > matchingScore * 0.5) {
+    logger.info(
+      `[Confluence] Rejected: opposing score ${opposingScore.toFixed(1)} > 50% of ` +
+        `matching ${matchingScore.toFixed(1)} — market too split`
+    );
+    return null;
+  }
+
   // Sort matching by weighted confidence
   matching.sort((a, b) => b.weightedConf - a.weightedConf);
   const best = { ...matching[0] };
@@ -106,30 +119,28 @@ function getBestSignal(signals, regime) {
     return s + m.confidence * w;
   }, 0) / totalWeight;
 
-  // Blend: 60% best signal, 40% weighted average (rewards confluence)
+  // Blend: 60% best signal, 40% weighted average (rewards confluence).
+  // This is already a confluence-reward mechanism — do NOT stack count
+  // bonuses on top. Instead we use ONE consolidated diversity bonus below
+  // which rewards agreement across DIFFERENT strategy types (a genuine
+  // independent confirmation) rather than merely "more signals from the
+  // same family" (e.g. trend+breakout often fire together and are not
+  // independent).
   let finalConfidence = Math.round(best.confidence * 0.6 + avgWeightedConf * 0.4);
 
-  // Confluence bonus based on count
-  if (matching.length >= 4) {
-    finalConfidence += 12;
-  } else if (matching.length >= 3) {
-    finalConfidence += 8;
-  } else if (matching.length >= 2) {
-    finalConfidence += 4;
-  }
+  // Consolidated bonus: reward only TYPE DIVERSITY, not raw count.
+  // This avoids double-counting correlated strategies.
+  const uniqueTypes = new Set(matching.map((s) => s.strategyType));
+  if (uniqueTypes.size >= 3) finalConfidence += 8;
+  else if (uniqueTypes.size >= 2) finalConfidence += 4;
 
-  // Conflicting signals penalty (weighted by opposing confidence)
+  // Mild residual opposing penalty (kept for borderline cases that survive
+  // the 50% rejection gate above).
   if (opposing.length > 0) {
     const maxOpposingConf = Math.max(...opposing.map((o) => o.weightedConf));
-    // High-confidence opposition = bigger penalty
-    const penalty = Math.round(maxOpposingConf * 0.15 * opposing.length);
-    finalConfidence -= Math.min(penalty, 20);
+    const penalty = Math.round(maxOpposingConf * 0.1);
+    finalConfidence -= Math.min(penalty, 10);
   }
-
-  // Strategy type diversity bonus: different types agreeing = stronger
-  const uniqueTypes = new Set(matching.map((s) => s.strategyType));
-  if (uniqueTypes.size >= 3) finalConfidence += 5;
-  else if (uniqueTypes.size >= 2) finalConfidence += 2;
 
   // Clamp to valid range. No artificial floor — weak signals should stay weak
   // so downstream gates can reject them honestly.
@@ -140,7 +151,7 @@ function getBestSignal(signals, regime) {
 
   logger.info(
     `[Confluence] ${direction} x${matching.length} vs ${opposing.length} opposing | ` +
-      `Regime: ${regimeType} (weight: ${best.regimeWeight.toFixed(1)}) | ` +
+      `Types: ${uniqueTypes.size} | Regime: ${regimeType} (weight: ${best.regimeWeight.toFixed(1)}) | ` +
       `Final confidence: ${best.confidence}%`
   );
 
