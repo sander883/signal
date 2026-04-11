@@ -373,13 +373,13 @@ JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT
       return result;
     } catch (err) {
       logger.warn(`[AI] Parse error: ${err.message} | raw: ${text.slice(0, 100)}`);
-      return {
-        approved: config.ai.fallbackAllow,
-        confidence: 50,
-        sentiment: 'neutral',
-        reason: 'Parse error — fallback',
-        adjustedSignal: null,
+      const safeSignal = {
+        signal: originalSignal?.signal || 'UNKNOWN',
+        confidence: Number.isFinite(Number(originalSignal?.confidence))
+          ? Number(originalSignal.confidence)
+          : config.ai.smartGateMin,
       };
+      return this._fallbackResult(safeSignal, 'Parse error', 'error');
     }
   }
 
@@ -410,6 +410,29 @@ JSON:{"s":"bull/bear/neut","sc":-100to100,"a":"analysis 60ch","r":"BUY/SELL/WAIT
       adjustedSignal: null,
       decisionSource: source,
     };
+  }
+
+  /**
+   * Conservative confidence blending.
+   * - Model decision: weighted blend (60% strategy, 40% AI).
+   * - Fallback/bypass decision: use the lower confidence to avoid over-trusting non-model paths.
+   */
+  deriveFinalConfidence(strategyConfidence, aiResult) {
+    const base = Math.max(0, Math.min(100, Number(strategyConfidence) || 0));
+    // If AI confidence is missing/invalid, keep base instead of collapsing to 0.
+    const aiRaw = Number(aiResult?.confidence);
+    const aiConf = Number.isFinite(aiRaw)
+      ? Math.max(0, Math.min(100, aiRaw))
+      : base;
+    const source = aiResult?.decisionSource || 'unknown';
+
+    if (source === 'model') {
+      // Conservative: blended score can only maintain/reduce base confidence, never inflate it.
+      const blended = Math.round(base * 0.6 + aiConf * 0.4);
+      return Math.min(base, blended);
+    }
+
+    return Math.min(base, aiConf);
   }
 
   /**
