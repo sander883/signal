@@ -32,10 +32,10 @@ function analyze(data) {
   const { bos, choch, trend } = structureBreaks;
   const { supply, demand } = supplyDemand;
 
-  // VWAP
-  const hasVwap = vwap && vwap.current;
-  const priceAboveVwap = hasVwap ? currentPrice > vwap.current : true;
-  const priceBelowVwap = hasVwap ? currentPrice < vwap.current : true;
+  // VWAP — neutral when missing (no free bonus)
+  const hasVwap = !!(vwap && vwap.current);
+  const priceAboveVwap = hasVwap && currentPrice > vwap.current;
+  const priceBelowVwap = hasVwap && currentPrice < vwap.current;
 
   // Zone proximity checks (ATR-relative)
   const zoneMargin = currentAtr * 0.5;
@@ -74,7 +74,7 @@ function analyze(data) {
     if (regime && regime.type === 'ranging') confidence -= 5;
 
     result.signal = 'BUY';
-    result.confidence = Math.min(Math.max(confidence, 30), 93);
+    result.confidence = Math.min(confidence, 93);
 
     logger.info(
       `[Price Action] BUY - Bullish BOS at ${bos.level.toFixed(2)} | ` +
@@ -100,7 +100,7 @@ function analyze(data) {
     if (regime && regime.type === 'trending' && regime.direction === 'bearish') confidence -= 5;
 
     result.signal = 'BUY';
-    result.confidence = Math.min(Math.max(confidence, 30), 93);
+    result.confidence = Math.min(confidence, 93);
 
     logger.info(
       `[Price Action] BUY - Bullish CHOCH at ${choch.level.toFixed(2)} | ` +
@@ -126,7 +126,7 @@ function analyze(data) {
     if (regime && regime.type === 'ranging') confidence -= 5;
 
     result.signal = 'SELL';
-    result.confidence = Math.min(Math.max(confidence, 30), 93);
+    result.confidence = Math.min(confidence, 93);
 
     logger.info(
       `[Price Action] SELL - Bearish BOS at ${bos.level.toFixed(2)} | ` +
@@ -151,7 +151,7 @@ function analyze(data) {
     if (regime && regime.type === 'trending' && regime.direction === 'bullish') confidence -= 5;
 
     result.signal = 'SELL';
-    result.confidence = Math.min(Math.max(confidence, 30), 93);
+    result.confidence = Math.min(confidence, 93);
 
     logger.info(
       `[Price Action] SELL - Bearish CHOCH at ${choch.level.toFixed(2)} | ` +

@@ -62,10 +62,11 @@ function analyze(data) {
   const strongMacdBull = macdHist > macdThreshold;
   const strongMacdBear = macdHist < -macdThreshold;
 
-  // VWAP alignment
+  // VWAP alignment — only reward/punish when VWAP actually exists
   const currentPrice = data.closes[data.closes.length - 1];
-  const priceAboveVwap = vwap && vwap.current ? currentPrice > vwap.current : true;
-  const priceBelowVwap = vwap && vwap.current ? currentPrice < vwap.current : true;
+  const hasVwap = !!(vwap && vwap.current);
+  const priceAboveVwap = hasVwap && currentPrice > vwap.current;
+  const priceBelowVwap = hasVwap && currentPrice < vwap.current;
 
   // ── BUY Signal ──
   if (bullishTrend && macdBullish && currentRsi < config.indicators.rsi.overbought) {
@@ -87,9 +88,11 @@ function analyze(data) {
     // RSI sweet spot (45-60) — not overextended
     if (currentRsi > 45 && currentRsi < 60) confidence += 7;
 
-    // VWAP confirmation: price above VWAP supports bullish
-    if (priceAboveVwap) confidence += 7;
-    else confidence -= 5;
+    // VWAP confirmation — neutral when VWAP missing (no bonus, no penalty)
+    if (hasVwap) {
+      if (priceAboveVwap) confidence += 7;
+      else confidence -= 5;
+    }
 
     // Stochastic not overbought (room to run)
     if (currentStoch && currentStoch.k < 80) confidence += 3;
@@ -98,7 +101,7 @@ function analyze(data) {
     if (regime && regime.direction === 'bullish') confidence += 5;
 
     result.signal = 'BUY';
-    result.confidence = Math.min(Math.max(confidence, 30), 95);
+    result.confidence = Math.min(confidence, 95);
   }
 
   // ── SELL Signal ──
@@ -113,14 +116,16 @@ function analyze(data) {
     if (currentMacd.MACD < currentMacd.signal) confidence += 5;
     if (currentRsi > 40 && currentRsi < 55) confidence += 7;
 
-    if (priceBelowVwap) confidence += 7;
-    else confidence -= 5;
+    if (hasVwap) {
+      if (priceBelowVwap) confidence += 7;
+      else confidence -= 5;
+    }
 
     if (currentStoch && currentStoch.k > 20) confidence += 3;
     if (regime && regime.direction === 'bearish') confidence += 5;
 
     result.signal = 'SELL';
-    result.confidence = Math.min(Math.max(confidence, 30), 95);
+    result.confidence = Math.min(confidence, 95);
   }
 
   if (result.signal) {

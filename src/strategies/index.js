@@ -83,7 +83,12 @@ function getBestSignal(signals, regime) {
     .filter((s) => s.signal === 'SELL')
     .reduce((sum, s) => sum + s.weightedConf, 0);
 
-  const direction = buyScore >= sellScore ? 'BUY' : 'SELL';
+  // Tied scores = indecisive market, refuse to force a direction.
+  if (buyScore === sellScore) {
+    logger.info(`[Confluence] Tied buy/sell score (${buyScore.toFixed(1)}) — no signal`);
+    return null;
+  }
+  const direction = buyScore > sellScore ? 'BUY' : 'SELL';
   const matching = weighted.filter((s) => s.signal === direction);
   const opposing = weighted.filter((s) => s.signal !== direction);
 
@@ -126,7 +131,9 @@ function getBestSignal(signals, regime) {
   if (uniqueTypes.size >= 3) finalConfidence += 5;
   else if (uniqueTypes.size >= 2) finalConfidence += 2;
 
-  best.confidence = Math.min(Math.max(finalConfidence, 25), 98);
+  // Clamp to valid range. No artificial floor — weak signals should stay weak
+  // so downstream gates can reject them honestly.
+  best.confidence = Math.min(Math.max(finalConfidence, 0), 98);
   best.confluence = matching.length;
   best.allStrategies = matching.map((s) => s.strategy).join(', ');
   best.regimeWeight = weights[best.strategyType] || 1;

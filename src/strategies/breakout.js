@@ -36,10 +36,10 @@ function analyze(data) {
 
   const { support, resistance } = supportResistance;
 
-  // VWAP data
-  const hasVwap = vwap && vwap.current;
-  const priceAboveVwap = hasVwap ? currentPrice > vwap.current : true;
-  const priceBelowVwap = hasVwap ? currentPrice < vwap.current : true;
+  // VWAP data — neutral when missing (no bonus awarded)
+  const hasVwap = !!(vwap && vwap.current);
+  const priceAboveVwap = hasVwap && currentPrice > vwap.current;
+  const priceBelowVwap = hasVwap && currentPrice < vwap.current;
 
   // ATR expansion: current ATR should be rising vs recent average
   const atrExpanding = atr5ago ? currentAtr > atr5ago * 1.1 : currentAtr > prevAtr;
@@ -91,7 +91,7 @@ function analyze(data) {
       if (regime && (regime.type === 'trending' || regime.type === 'weak-trend')) confidence += 3;
 
       result.signal = 'BUY';
-      result.confidence = Math.min(Math.max(confidence, 30), 93);
+      result.confidence = Math.min(confidence, 93);
       result.breakoutLevel = level;
 
       logger.info(
@@ -136,7 +136,7 @@ function analyze(data) {
         if (regime && (regime.type === 'trending' || regime.type === 'weak-trend')) confidence += 3;
 
         result.signal = 'SELL';
-        result.confidence = Math.min(Math.max(confidence, 30), 93);
+        result.confidence = Math.min(confidence, 93);
         result.breakoutLevel = level;
 
         logger.info(

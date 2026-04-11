@@ -48,11 +48,11 @@ function analyze(data) {
   // No crossover = no scalp signal
   if (!bullishCross && !bearishCross) return result;
 
-  // VWAP data
+  // VWAP data — neutral when missing (no reward/penalty)
   const currentPrice = data.closes[data.closes.length - 1];
-  const hasVwap = vwap && vwap.current;
-  const priceAboveVwap = hasVwap ? currentPrice > vwap.current : true;
-  const priceBelowVwap = hasVwap ? currentPrice < vwap.current : true;
+  const hasVwap = !!(vwap && vwap.current);
+  const priceAboveVwap = hasVwap && currentPrice > vwap.current;
+  const priceBelowVwap = hasVwap && currentPrice < vwap.current;
   // Distance from VWAP (% of price)
   const vwapDistance = hasVwap ? Math.abs(currentPrice - vwap.current) / currentPrice * 100 : 0;
 
@@ -76,9 +76,11 @@ function analyze(data) {
     // RSI sweet spot
     if (currRsi > 50 && currRsi < 62) confidence += 5;
 
-    // VWAP: price above or near VWAP supports buying
-    if (priceAboveVwap) confidence += 7;
-    else if (vwapDistance < 0.05) confidence += 3; // Very close to VWAP, still ok
+    // VWAP: price above or near VWAP supports buying (only when data exists)
+    if (hasVwap) {
+      if (priceAboveVwap) confidence += 7;
+      else if (vwapDistance < 0.05) confidence += 3; // Very close to VWAP, still ok
+    }
 
     // Stochastic confirmation
     if (stochRising) confidence += 5;
@@ -88,7 +90,7 @@ function analyze(data) {
     if (atrRatio > 0.8 && atrRatio < 2.0) confidence += 3;
 
     result.signal = 'BUY';
-    result.confidence = Math.min(Math.max(confidence, 30), 90);
+    result.confidence = Math.min(confidence, 90);
   }
 
   // ── SELL ──
@@ -102,8 +104,10 @@ function analyze(data) {
 
     if (currRsi > 38 && currRsi < 50) confidence += 5;
 
-    if (priceBelowVwap) confidence += 7;
-    else if (vwapDistance < 0.05) confidence += 3;
+    if (hasVwap) {
+      if (priceBelowVwap) confidence += 7;
+      else if (vwapDistance < 0.05) confidence += 3;
+    }
 
     if (stochFalling) confidence += 5;
     if (stochOverbought) confidence += 5;
@@ -111,7 +115,7 @@ function analyze(data) {
     if (atrRatio > 0.8 && atrRatio < 2.0) confidence += 3;
 
     result.signal = 'SELL';
-    result.confidence = Math.min(Math.max(confidence, 30), 90);
+    result.confidence = Math.min(confidence, 90);
   }
 
   if (result.signal) {

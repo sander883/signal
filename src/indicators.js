@@ -417,11 +417,12 @@ class Indicators {
     if (higherHighs && higherLows) result.trend = 'bullish';
     else if (lowerHighs && lowerLows) result.trend = 'bearish';
 
-    // BOS: only detect if the break is RECENT (within last 3 candles)
+    // BOS: only detect if the break is RECENT (within last 3 candles).
+    // Keeping this tight avoids firing "stale" BOS signals hours after the break.
     const priceJustBrokeHigh = currentPrice > lastHigh.price &&
-      recent.length - 1 - lastHigh.index <= 10;
+      recent.length - 1 - lastHigh.index <= 3;
     const priceJustBrokeLow = currentPrice < lastLow.price &&
-      recent.length - 1 - lastLow.index <= 10;
+      recent.length - 1 - lastLow.index <= 3;
 
     if (result.trend === 'bullish' && priceJustBrokeHigh) {
       result.bos = { direction: 'bullish', level: lastHigh.price };

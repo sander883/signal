@@ -105,7 +105,7 @@ function analyze(data) {
     if (currentAtr && (middle - currentPrice) > currentAtr * 0.5) confidence += 3;
 
     result.signal = 'BUY';
-    result.confidence = Math.min(Math.max(confidence, 30), 90);
+    result.confidence = Math.min(confidence, 90);
 
     logger.info(
       `[Mean Reversion] BUY - Price ${currentPrice.toFixed(2)} at lower BB ${lower.toFixed(2)} | ` +
@@ -142,7 +142,7 @@ function analyze(data) {
     if (currentAtr && (currentPrice - middle) > currentAtr * 0.5) confidence += 3;
 
     result.signal = 'SELL';
-    result.confidence = Math.min(Math.max(confidence, 30), 90);
+    result.confidence = Math.min(confidence, 90);
 
     logger.info(
       `[Mean Reversion] SELL - Price ${currentPrice.toFixed(2)} at upper BB ${upper.toFixed(2)} | ` +

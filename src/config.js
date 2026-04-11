@@ -21,7 +21,7 @@ const config = {
   // Trading
   symbol: 'XAU/USD',
   // Multi-timeframe: bot runs independent analysis on each enabled TF
-  timeframes: (process.env.TIMEFRAMES || '15min,1h').split(',').map((t) => t.trim()),
+  timeframes: (process.env.TIMEFRAMES || '15min,1h,4h').split(',').map((t) => t.trim()),
   primaryTimeframe: process.env.PRIMARY_TIMEFRAME || '15min',
   secondaryTimeframe: process.env.SECONDARY_TIMEFRAME || '1h',
   riskPercent: parseFloat(process.env.RISK_PERCENT) || 1.5,
