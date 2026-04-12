@@ -8,7 +8,8 @@
     "dev": "node --watch src/index.js",
     "backtest": "node src/backtest.js",
     "test": "node --test",
-    "check": "node --check src/index.js && node --check src/backtest.js"
+    "check": "node --check src/index.js && node --check src/backtest.js",
+    "sync-data": "node scripts/syncData.js"
   },
   "repository": {
     "type": "git",
