@@ -5,6 +5,13 @@ Tanggal review: 2026-04-12
 ## Ringkasan cepat
 Bot ini adalah generator sinyal XAU/USD berbasis Node.js dengan arsitektur yang cukup matang untuk ukuran proyek retail: multi-strategy, news filter wajib, session filter, risk management ATR, optional AI gate, paper trading, dan data collection untuk evaluasi model.
 
+## Klarifikasi tujuan proyek
+Review ini sekarang disesuaikan dengan tujuan yang kamu jelaskan:
+- **fokus saat ini untuk pengumpulan dataset**, observability, dan validasi ide strategi,
+- **menjadi fondasi sebelum naik ke live auto-trading**.
+
+Dengan konteks itu, banyak keputusan desain di repo ini sudah tepat sebagai fase awal (safety dulu, logging detail, dan modularitas).
+
 Secara desain, fondasinya **sudah lebih baik dari banyak bot sinyal publik**, terutama karena:
 - ada guardrail risk dan filter berita,
 - ada fallback provider data + circuit breaker,
@@ -40,8 +47,8 @@ Namun, tetap ada gap penting untuk production-grade trading:
 
 ## Risiko / kelemahan yang perlu diperhatikan
 
-1. **Masih signal-centric, bukan full trading system institutional**
-   - Belum ada trade execution engine broker + reconciliation real fills/slippage/partial fills.
+1. **Memang belum live-execution (dan itu wajar di fase sekarang)**
+   - Karena target utamanya dataset/fondasi, belum ada trade execution engine broker + reconciliation fill/slippage/partial fills.
 
 2. **AI gate bisa jadi titik ketidakpastian tambahan**
    - AI dipakai hanya di confidence grey zone (bagus untuk cost), tapi fallback mode tetap memberi keputusan deterministik saat API gagal.
@@ -72,8 +79,8 @@ Namun, tetap ada gap penting untuk production-grade trading:
    - News window boundary, risk sizing edge cases, forming-bar stripping, dan confidence penalty logic.
 
 ## Kesimpulan
-Untuk kelas bot sinyal XAUUSD open-source, ini **di atas rata-rata** dari sisi engineering hygiene dan risk-aware architecture.
+Untuk fase **dataset collection + fondasi sistem**, arsitektur bot ini **sudah tepat arah** dan di atas rata-rata proyek bot sinyal open-source.
 
-Kalau tujuanmu adalah **signal bot + paper trading yang disiplin**, repo ini layak dipakai sebagai basis.
+Kalau tujuanmu sekarang adalah **membangun data berkualitas + alur keputusan yang konsisten**, repo ini layak dipakai sebagai basis.
 
-Kalau tujuanmu **live auto-trading serius**, perlu tambahan besar di area execution reliability, statistical validation, dan model governance.
+Saat nanti naik ke **live auto-trading**, kamu tinggal lanjutkan bertahap di area execution reliability, statistical validation, dan model governance.
