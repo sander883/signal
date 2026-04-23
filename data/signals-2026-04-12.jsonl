@@ -1,1 +1,20 @@
-{"ts":"2026-04-12T10:00:00Z","timeframe":"15min","decision":"sent","price":2345.67,"strategy":"Trend Following","confidence":78}
+{"ts":"2026-04-12T03:31:54.224Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T03:31:54.227Z","timeframe":"1h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T03:31:54.227Z","timeframe":"4h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T05:00:22.456Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T05:00:22.459Z","timeframe":"1h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T05:00:22.459Z","timeframe":"4h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T06:13:17.183Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T06:13:17.186Z","timeframe":"1h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T06:13:17.187Z","timeframe":"4h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T22:00:00.141Z","timeframe":"4h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T22:00:00.149Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T22:00:00.153Z","timeframe":"1h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T22:15:00.134Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T22:30:00.112Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T22:45:00.135Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T23:00:00.061Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T23:00:00.065Z","timeframe":"1h","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T23:15:00.072Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T23:30:00.024Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
+{"ts":"2026-04-12T23:45:00.127Z","timeframe":"15min","decision":"blocked_session","reason":"Market closed (weekend)","session":"weekend"}
