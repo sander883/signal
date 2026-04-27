@@ -18,6 +18,13 @@ const config = {
     baseUrl: 'https://www.alphavantage.co/query',
   },
 
+  // TradingView (free fallback data provider — no API key needed)
+  tradingview: {
+    symbol: process.env.TV_SYMBOL || 'OANDA:XAUUSD',
+    sessionId: process.env.TV_SESSION_ID || '',
+    signature: process.env.TV_SIGNATURE || '',
+  },
+
   // Trading
   symbol: 'XAU/USD',
   // Multi-timeframe: bot runs independent analysis on each enabled TF

@@ -1,4 +1,5 @@
 const axios = require('axios');
+const TradingView = require('@mathieuc/tradingview');
 const config = require('./config');
 const logger = require('./logger');
 
@@ -47,6 +48,7 @@ class MarketData {
     this.providerState = {
       twelvedata: { failures: 0, blockedUntil: 0 },
       alphavantage: { failures: 0, blockedUntil: 0 },
+      tradingview: { failures: 0, blockedUntil: 0 },
     };
     this.breakerCooldownMs = 5 * 60 * 1000; // 5 minutes
     this.lastSuccessfulFetch = {}; // per timeframe: { ts, provider }
@@ -87,8 +89,8 @@ class MarketData {
     try {
       const preferred = config.dataProvider === 'alphavantage' ? 'alphavantage' : 'twelvedata';
       const order = preferred === 'twelvedata'
-        ? ['twelvedata', 'alphavantage']
-        : ['alphavantage', 'twelvedata'];
+        ? ['twelvedata', 'alphavantage', 'tradingview']
+        : ['alphavantage', 'twelvedata', 'tradingview'];
 
       let candles;
       let usedProvider;
@@ -96,9 +98,9 @@ class MarketData {
       for (const provider of order) {
         if (this._isProviderBlocked(provider)) continue;
         try {
-          candles = provider === 'twelvedata'
-            ? await this._fetchTwelveData(timeframe, outputSize)
-            : await this._fetchAlphaVantage(timeframe, outputSize);
+          if (provider === 'twelvedata') candles = await this._fetchTwelveData(timeframe, outputSize);
+          else if (provider === 'alphavantage') candles = await this._fetchAlphaVantage(timeframe, outputSize);
+          else if (provider === 'tradingview') candles = await this._fetchTradingView(timeframe, outputSize);
           this._recordProviderSuccess(provider);
           usedProvider = provider;
           break;
@@ -285,6 +287,87 @@ class MarketData {
       .slice(-outputSize);
 
     return candles;
+  }
+
+  /**
+   * Fetch candles from TradingView websocket API (free, no key needed).
+   * Used as last-resort fallback when TwelveData + AlphaVantage both fail.
+   */
+  async _fetchTradingView(timeframe, outputSize) {
+    const tvTimeframe = {
+      '1min': '1', '5min': '5', '15min': '15', '30min': '30',
+      '1h': '60', '4h': '240', '1day': 'D',
+    }[timeframe];
+    if (!tvTimeframe) throw new Error(`TradingView: unsupported timeframe ${timeframe}`);
+
+    const tvSymbol = config.tradingview?.symbol || 'OANDA:XAUUSD';
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        try { client.end(); } catch (_) {}
+        reject(new Error('TradingView: connection timeout (20s)'));
+      }, 20000);
+
+      let client;
+      try {
+        const clientOpts = {};
+        if (config.tradingview?.sessionId) {
+          clientOpts.token = config.tradingview.sessionId;
+          clientOpts.signature = config.tradingview.signature || '';
+        }
+        client = new TradingView.Client(clientOpts);
+      } catch (err) {
+        clearTimeout(timeout);
+        throw new Error(`TradingView: client init failed: ${err.message}`);
+      }
+
+      const chart = new client.Session.Chart();
+
+      chart.onError((...err) => {
+        clearTimeout(timeout);
+        try { client.end(); } catch (_) {}
+        reject(new Error(`TradingView chart error: ${err.join(' ')}`));
+      });
+
+      chart.onUpdate(() => {
+        try {
+          const periods = Object.values(chart.periods);
+          if (periods.length < 10) return; // Wait for more data
+
+          clearTimeout(timeout);
+
+          const candles = periods
+            .map((p) => ({
+              time: new Date(p.time * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ''),
+              open: p.open,
+              high: p.max,
+              low: p.min,
+              close: p.close,
+              volume: p.volume || 0,
+            }))
+            .filter((c) => Number.isFinite(c.close) && Number.isFinite(c.high) && Number.isFinite(c.low))
+            .sort((a, b) => a.time.localeCompare(b.time));
+
+          chart.delete();
+          client.end();
+
+          if (candles.length === 0) {
+            reject(new Error('TradingView: no valid candles'));
+            return;
+          }
+
+          resolve(candles.slice(-outputSize));
+        } catch (err) {
+          try { client.end(); } catch (_) {}
+          reject(new Error(`TradingView parse error: ${err.message}`));
+        }
+      });
+
+      chart.setMarket(tvSymbol, {
+        timeframe: tvTimeframe,
+        range: Math.min(outputSize, 300),
+      });
+    });
   }
 
   /**

@@ -19,6 +19,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@mathieuc/tradingview": "^3.5.2",
     "axios": "^1.15.0",
     "dotenv": "^17.4.1",
     "node-cron": "^4.2.1",
