@@ -40,9 +40,10 @@ function analyze(data) {
   }
 
   // ── ADX Trend Strength ──
-  // Require ADX > 20 to confirm a real trend exists
+  // Require ADX > 30 to confirm a strong trend (tightened from 20; data shows
+  // 12% WR at ADX 20-30 → signals in weak trends consistently lose)
   const adxValue = currentAdx ? currentAdx.adx : 0;
-  if (adxValue < 20) return result;
+  if (adxValue < 30) return result;
 
   const macdHist = currentMacd.histogram;
   const prevMacdHist = prevMacd.histogram;

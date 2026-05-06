@@ -93,9 +93,9 @@ const config = {
       baseUrl: process.env.MINIMAX_BASE_URL || 'https://api.minimax.chat/v1',
     },
     // Minimum AI confidence to keep signal (0-100). Below this = reject.
-    minConfidence: parseInt(process.env.AI_MIN_CONFIDENCE) || 40,
+    minConfidence: parseInt(process.env.AI_MIN_CONFIDENCE) || 65,
     // When AI is unavailable, should signals still pass?
-    fallbackAllow: process.env.AI_FALLBACK_ALLOW !== 'false',
+    fallbackAllow: process.env.AI_FALLBACK_ALLOW === 'true',
     // Fallback mode: 'strict' (reject 50-65 on AI fail) or 'normal' (pass with penalty)
     fallbackMode: process.env.AI_FALLBACK_MODE || 'strict',
     // Confidence penalty applied to bypassed signals in normal mode (0-30)
@@ -117,7 +117,7 @@ const config = {
 
   // DXY Correlation Filter
   dxyFilter: {
-    enabled: process.env.DXY_FILTER_ENABLED !== 'false',
+    enabled: process.env.DXY_FILTER_ENABLED === 'true',
     symbol: process.env.DXY_SYMBOL || 'DXY',
     timeframe: process.env.DXY_TIMEFRAME || '1h',
   },
@@ -125,8 +125,8 @@ const config = {
   // Risk Management
   risk: {
     accountBalance: parseFloat(process.env.ACCOUNT_BALANCE) || 10000,
-    atrMultiplierSL: 1.5,
-    atrMultiplierTP: 3.0,
+    atrMultiplierSL: 2.0,
+    atrMultiplierTP: 4.0,
     trailingStopEnabled: true,
     breakEvenEnabled: true,
     spreadPoints: parseFloat(process.env.SPREAD_POINTS) || 0.30, // typical XAUUSD spread

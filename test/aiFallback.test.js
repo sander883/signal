@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 // Force a known config before requiring aiAgent so its defaults match the test expectations.
+process.env.AI_FALLBACK_ALLOW = 'true';
 process.env.AI_FALLBACK_MODE = 'strict';
 process.env.AI_FALLBACK_PENALTY = '10';
 process.env.AI_GATE_MIN = '50';
@@ -47,6 +48,7 @@ test('AI getStats() returns bypassRate and decisionSources', () => {
 
 test('AI fallback (normal mode): approves grey zone with penalty', async () => {
   // Re-import with normal mode
+  process.env.AI_FALLBACK_ALLOW = 'true';
   process.env.AI_FALLBACK_MODE = 'normal';
   delete require.cache[require.resolve('../src/config')];
   delete require.cache[require.resolve('../src/aiAgent')];
@@ -62,6 +64,7 @@ test('AI fallback (normal mode): approves grey zone with penalty', async () => {
 });
 
 test('AI parse error follows strict fallback (rejects low confidence)', () => {
+  process.env.AI_FALLBACK_ALLOW = 'true';
   process.env.AI_FALLBACK_MODE = 'strict';
   delete require.cache[require.resolve('../src/config')];
   delete require.cache[require.resolve('../src/aiAgent')];

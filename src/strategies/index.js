@@ -67,7 +67,19 @@ function getBestSignal(signals, regime) {
   if (signals.length === 0) return null;
 
   const regimeType = regime && regime.type ? regime.type : 'unknown';
+  const regimeDir = regime && regime.direction ? regime.direction : 'neutral';
   const weights = regimeWeights[regimeType] || regimeWeights.unknown;
+
+  // Counter-trend filter: remove signals opposing the regime direction.
+  // Data shows 28% of trending-regime signals fire against trend → all lose.
+  if (regimeDir !== 'neutral') {
+    signals = signals.filter((s) => {
+      if (regimeDir === 'bullish' && s.signal === 'SELL') return false;
+      if (regimeDir === 'bearish' && s.signal === 'BUY') return false;
+      return true;
+    });
+    if (signals.length === 0) return null;
+  }
 
   // Compute weighted confidence for each signal
   const weighted = signals.map((s) => {
