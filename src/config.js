@@ -8,7 +8,7 @@ const config = {
   },
 
   // Data Provider
-  dataProvider: process.env.DATA_PROVIDER || 'twelvedata',
+  dataProvider: process.env.DATA_PROVIDER || 'tradingview',
   twelvedata: {
     apiKey: process.env.TWELVEDATA_API_KEY || '',
     baseUrl: 'https://api.twelvedata.com',

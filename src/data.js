@@ -87,10 +87,12 @@ class MarketData {
     }
 
     try {
-      const preferred = config.dataProvider === 'alphavantage' ? 'alphavantage' : 'twelvedata';
-      const order = preferred === 'twelvedata'
-        ? ['twelvedata', 'alphavantage', 'tradingview']
-        : ['alphavantage', 'twelvedata', 'tradingview'];
+      const providerOrders = {
+        tradingview: ['tradingview', 'twelvedata', 'alphavantage'],
+        twelvedata: ['twelvedata', 'alphavantage', 'tradingview'],
+        alphavantage: ['alphavantage', 'twelvedata', 'tradingview'],
+      };
+      const order = providerOrders[config.dataProvider] || providerOrders.tradingview;
 
       let candles;
       let usedProvider;

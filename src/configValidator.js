@@ -13,7 +13,7 @@ const config = require('./config');
  */
 
 const VALID_TIMEFRAMES = ['1min', '5min', '15min', '30min', '1h', '4h', '1day'];
-const VALID_PROVIDERS = ['twelvedata', 'alphavantage'];
+const VALID_PROVIDERS = ['tradingview', 'twelvedata', 'alphavantage'];
 
 function validate() {
   const errors = [];
